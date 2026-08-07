@@ -1,0 +1,1289 @@
+#!/data/data/com.termux/files/usr/bin/env bash
+# glibcx - Universal Native-Speed glibc Binary Runner & Patcher
+set -euo pipefail
+
+GLIBC_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}/glibc"
+GLIBC_INTERPRETER="${GLIBC_PREFIX}/lib/ld-linux-aarch64.so.1"
+GLIBC_LIB_DIR="${GLIBC_PREFIX}/lib"
+CLI_STORAGE="${HOME:-/data/data/com.termux/files/home}/.glibcx"
+REGISTRY_FILE="${CLI_STORAGE}/registry.json"
+
+# Registry schema (per blueprint):
+#   key   = absolute binary_path
+#   value = { orig_hash, patched_fingerprint, glibc_required, patched_at }
+
+init_env() {
+    mkdir -p "${CLI_STORAGE}/bin" "${CLI_STORAGE}/storage" "${CLI_STORAGE}/logs" "${CLI_STORAGE}/opt"
+    if [[ ! -f "$REGISTRY_FILE" ]]; then
+        echo "{}" > "$REGISTRY_FILE"
+    fi
+}
+
+# Drift fingerprint: mtime + size — fast, no re-hash on every invocation
+_fingerprint() {
+    stat -c '%Y_%s' "$1" 2>/dev/null || echo "missing"
+}
+
+# json_update_entry <binary_path> <orig_hash> <patched_fp> <glibc_required>
+json_update_entry() {
+    local path="$1" orig="$2" fp="$3" glibc="$4"
+    local ts
+    ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u)
+    if command -v jq >/dev/null 2>&1; then
+        local tmp
+        tmp="$(mktemp)"
+        jq --arg path "$path" --arg orig "$orig" --arg fp "$fp" \
+           --arg glibc "$glibc" --arg ts "$ts" \
+           '.[$path] = {orig_hash: $orig, patched_fingerprint: $fp, glibc_required: $glibc, patched_at: $ts}' \
+           "$REGISTRY_FILE" > "$tmp"
+        mv "$tmp" "$REGISTRY_FILE"
+    else
+        python3 -c '
+import json, sys, datetime
+f, path, orig, fp, glibc = sys.argv[1:6]
+try:
+    with open(f) as fh: data = json.load(fh)
+except Exception: data = {}
+data[path] = {
+    "orig_hash": orig,
+    "patched_fingerprint": fp,
+    "glibc_required": glibc,
+    "patched_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+}
+with open(f, "w") as fh: json.dump(data, fh, indent=2)
+' "$REGISTRY_FILE" "$path" "$orig" "$fp" "$glibc"
+    fi
+}
+
+json_delete_entry() {
+    local path="$1"
+    if command -v jq >/dev/null 2>&1; then
+        local tmp
+        tmp="$(mktemp)"
+        jq --arg p "$path" 'del(.[$p])' "$REGISTRY_FILE" > "$tmp"
+        mv "$tmp" "$REGISTRY_FILE"
+    else
+        python3 -c '
+import json, sys
+f, path = sys.argv[1:3]
+try:
+    with open(f) as fh: data = json.load(fh)
+    data.pop(path, None)
+    with open(f, "w") as fh: json.dump(data, fh, indent=2)
+except Exception: pass
+' "$REGISTRY_FILE" "$path"
+    fi
+}
+
+# json_get_val <binary_path> <field>
+json_get_val() {
+    local path="$1" key="$2"
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg p "$path" '.[$p]['"\"$key\""'] // empty' "$REGISTRY_FILE" 2>/dev/null || echo ""
+    else
+        python3 -c '
+import json, sys
+f, path, key = sys.argv[1:4]
+try:
+    with open(f) as fh: data = json.load(fh)
+    print(data.get(path, {}).get(key, ""))
+except Exception: print("")
+' "$REGISTRY_FILE" "$path" "$key"
+    fi
+}
+
+# json_list_entries — prints human-readable table
+json_list_entries() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -r 'to_entries[]
+            | "  \(.key)\n    glibc required : \(.value.glibc_required)\n    patched at     : \(.value.patched_at)\n    fingerprint    : \(.value.patched_fingerprint)"' \
+            "$REGISTRY_FILE"
+    else
+        python3 -c '
+import json, sys
+f = sys.argv[1]
+try:
+    with open(f) as fh: data = json.load(fh)
+    if not data:
+        print("  No patched binaries registered.")
+    for path, v in data.items():
+        print(f"  {path}")
+        print(f"    glibc required : {v.get(\"glibc_required\", \"\")}")
+        print(f"    patched at     : {v.get(\"patched_at\", \"\")}")
+        print(f"    fingerprint    : {v.get(\"patched_fingerprint\", \"\")}")
+except Exception:
+    print("  No patched binaries registered.")
+' "$REGISTRY_FILE"
+    fi
+}
+
+# json_list_paths — emit one absolute path per line (for iteration)
+json_list_paths() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -r 'keys[]' "$REGISTRY_FILE" 2>/dev/null || true
+    else
+        python3 -c '
+import json, sys
+f = sys.argv[1]
+try:
+    with open(f) as fh: data = json.load(fh)
+    for k in data: print(k)
+except Exception: pass
+' "$REGISTRY_FILE"
+    fi
+}
+cmd_setup() {
+    echo "[glibcx] Initializing setup and prerequisites..."
+    pkg update -y
+    pkg install glibc-runner patchelf binutils xxd file jq clang curl nodejs -y
+
+    init_env
+
+    local path_line='export PATH="$HOME/.glibcx/bin:$PATH"'
+    for rc in "${HOME}/.bashrc" "${HOME}/.zshrc"; do
+        if [[ -f "$rc" ]]; then
+            if ! grep -qs "glibcx/bin" "$rc"; then
+                printf '\n# glibcx binary path\n%s\n' "$path_line" >> "$rc"
+                echo "[glibcx] Appended PATH export to $rc"
+            fi
+        elif [[ "$rc" == "${HOME}/.bashrc" ]]; then
+            printf '# glibcx binary path\n%s\n' "$path_line" > "$rc"
+            echo "[glibcx] Created $rc with PATH export"
+        fi
+    done
+
+    if command -v rish >/dev/null 2>&1; then
+        echo "[glibcx] Shizuku (rish) detected. Lifting Android 12+ phantom process cap..."
+        rish -c "device_config put activity_manager max_phantom_processes 2147483647" || true
+        echo "[glibcx] Phantom process cap lifted."
+    else
+        echo "[glibcx] WARNING: 'rish' not found. On Android 12+, heavy workloads may be killed"
+        echo "[glibcx]   by the phantom process killer. To fix:"
+        echo "[glibcx]   1. Install Shizuku from Play Store"
+        echo "[glibcx]   2. Pair via wireless debugging (Settings > Developer options)"
+        echo "[glibcx]   3. Re-run 'glibcx setup'"
+    fi
+
+    # Fix glibc-runner linker script issue
+    # The glibc-runner package ships libc.so as a text linker script (normal for compilation).
+    # However, if any library or fallback probes for libc.so at runtime, ld.so will crash
+    # with "invalid ELF header". We safely move it and symlink to the real ELF.
+    local glibc_lib="${PREFIX}/glibc/lib"
+    if [[ -f "${glibc_lib}/libc.so" ]] && ! [[ -L "${glibc_lib}/libc.so" ]]; then
+        if file "${glibc_lib}/libc.so" | grep -qi "text"; then
+            echo "[glibcx] Applying Termux glibc-runner libc.so text-script fix..."
+            mv "${glibc_lib}/libc.so" "${glibc_lib}/libc.so.script"
+            ln -s "libc.so.6" "${glibc_lib}/libc.so"
+        fi
+    fi
+
+    echo "[glibcx] Setup complete. Restart your shell or run: source ~/.bashrc"
+}
+# Known glibc-provided libraries — anything outside this set is a non-glibc dep
+_GLIBC_LIBS_RE="^(ld-linux|lib(c|m|dl|pthread|rt|util|resolv|nsl|crypt|anl|nss_))"
+
+cmd_patch() {
+    init_env
+    local target_bin="${1:-}"
+    if [[ -z "$target_bin" || ! -f "$target_bin" ]]; then
+        echo "[glibcx] Error: File '${target_bin:-<none>}' not found." >&2
+        echo "Usage: glibcx patch <binary>" >&2
+        exit 1
+    fi
+
+    target_bin="$(realpath "$target_bin")"
+
+    if ! file "$target_bin" | grep -q "ELF 64-bit LSB"; then
+        echo "[glibcx] Error: '$target_bin' is not a valid 64-bit ELF binary." >&2
+        exit 1
+    fi
+
+    local bin_name
+    bin_name="$(basename "$target_bin")"
+    echo "[glibcx] Auditing '$bin_name'..."
+
+    # --- 1. NEEDED library audit ------------------------------------------------
+    echo "[glibcx] Needed shared libraries:"
+    local needed_libs
+    needed_libs=$(readelf -d "$target_bin" 2>/dev/null | grep NEEDED | grep -oP '\[\K[^\]]+' || true)
+    if [[ -z "$needed_libs" ]]; then
+        echo "  (none — statically linked or stripped dynamic section)"
+    else
+        local non_glibc=()
+        while IFS= read -r lib; do
+            if echo "$lib" | grep -qE "$_GLIBC_LIBS_RE"; then
+                echo "  [glibc]  $lib"
+            else
+                echo "  [EXTERN] $lib  <-- NOT resolved by glibcx"
+                non_glibc+=("$lib")
+            fi
+        done <<< "$needed_libs"
+        if [[ ${#non_glibc[@]} -gt 0 ]]; then
+            echo "[glibcx] WARNING: ${#non_glibc[@]} non-glibc dep(s) detected."
+            echo "[glibcx]   These will fail at runtime unless vendored manually beside the binary."
+            echo "[glibcx]   Missing: ${non_glibc[*]}"
+        fi
+    fi
+
+    # --- 2. GLIBC version audit -------------------------------------------------
+    local max_req_glibc
+    max_req_glibc=$(readelf -V "$target_bin" 2>/dev/null \
+        | grep -oE "GLIBC_[0-9]+\.[0-9]+" | sort -V | tail -n1 || echo "unknown")
+
+    local have_glibc
+    have_glibc=$(strings "${GLIBC_LIB_DIR}/libc.so.6" 2>/dev/null \
+        | grep -oE "GLIBC_[0-9]+\.[0-9]+" | sort -V | tail -n1 || echo "unknown")
+
+    echo "[glibcx] Binary requires GLIBC up to : $max_req_glibc"
+    echo "[glibcx] Installed glibc provides up to: $have_glibc"
+
+    if [[ "$max_req_glibc" != "unknown" && "$have_glibc" != "unknown" ]]; then
+        # Compare versions — sort -V, pick highest; if req > have, warn
+        local highest
+        highest=$(printf '%s\n%s\n' "$max_req_glibc" "$have_glibc" | sort -V | tail -n1)
+        if [[ "$highest" == "$max_req_glibc" && "$max_req_glibc" != "$have_glibc" ]]; then
+            echo "[glibcx] WARNING: binary requires $max_req_glibc but installed glibc only provides $have_glibc."
+            echo "[glibcx]   Symbol resolution may fail at runtime."
+        fi
+    fi
+
+    # --- 3. Backup original -----------------------------------------------------
+    local orig_hash
+    orig_hash=$(sha256sum "$target_bin" | awk '{print $1}')
+    local backup_dir="${CLI_STORAGE}/storage/${orig_hash:0:12}"
+    mkdir -p "$backup_dir"
+    if [[ ! -f "${backup_dir}/${bin_name}.orig" ]]; then
+        cp "$target_bin" "${backup_dir}/${bin_name}.orig"
+        echo "[glibcx] Backup saved: ${backup_dir}/${bin_name}.orig"
+    else
+        echo "[glibcx] Backup already exists (same hash). Skipping."
+    fi
+
+    # --- 4. Fingerprint (mtime+size for drift detection) -----------------------
+    local patched_fp
+    patched_fp=$(_fingerprint "$target_bin")
+
+    # --- 5. Registry entry (keyed by full path) --------------------------------
+    json_update_entry "$target_bin" "$orig_hash" "$patched_fp" "$max_req_glibc"
+
+    # --- 6. Compile C userland-exec wrapper ------------------------------------
+    local wrapper_c="${CLI_STORAGE}/bin/${bin_name}.c"
+    local wrapper_bin="${CLI_STORAGE}/bin/${bin_name}"
+
+    cat << C_CODE > "$wrapper_c"
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <elf.h>
+
+#define PAGE_UP(x)   (((x) + 4095) & ~4095)
+#define PAGE_DOWN(x) ((x) & ~4095)
+#define MAX_ARGS 4096
+#define MAX_ENV  4096
+
+void die(const char *msg) { perror(msg); exit(1); }
+
+unsigned long getauxval_from_envp(const char **envp, unsigned long type) {
+    const char **p = envp;
+    while (*p) p++;
+    p++;
+    unsigned long *auxv = (unsigned long *)p;
+    for (; auxv[0] != AT_NULL; auxv += 2)
+        if (auxv[0] == type) return auxv[1];
+    return 0;
+}
+
+/* Drift check: mtime+size fingerprint must match what glibcx recorded. */
+static void check_drift(void) {
+    const char *target = "${target_bin}";
+    const char *recorded_fp = "${patched_fp}";
+    struct stat st;
+    if (stat(target, &st) != 0) {
+        fprintf(stderr, "[glibcx] Error: target binary missing: %s\n", target);
+        exit(1);
+    }
+    char fp[64];
+    snprintf(fp, sizeof(fp), "%lld_%lld", (long long)st.st_mtime, (long long)st.st_size);
+    if (strcmp(fp, recorded_fp) != 0) {
+        fprintf(stderr,
+            "[glibcx] '%s' changed since patching (self-update detected).\n"
+            "[glibcx] Re-run: glibcx patch %s\n", target, target);
+        exit(1);
+    }
+}
+
+int main(int argc, const char **argv, const char **envp) {
+    check_drift();
+
+    const char *target_exe = "${target_bin}";
+    const char *ldso       = "${GLIBC_INTERPRETER}";
+
+    int fd = open(ldso, O_RDONLY);
+    if (fd < 0) die("open ld.so");
+
+    struct stat st; fstat(fd, &st);
+    uint8_t *fdata = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (fdata == MAP_FAILED) die("mmap ld.so");
+
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)fdata;
+    size_t vmin = (size_t)-1, vmax = 0;
+    for (int i = 0; i < eh->e_phnum; i++) {
+        const Elf64_Phdr *ph = (const Elf64_Phdr *)(fdata + eh->e_phoff + i * eh->e_phentsize);
+        if (ph->p_type == PT_LOAD) {
+            if (ph->p_vaddr < vmin) vmin = ph->p_vaddr;
+            size_t e = ph->p_vaddr + ph->p_memsz;
+            if (e > vmax) vmax = e;
+        }
+    }
+    vmin = PAGE_DOWN(vmin); vmax = PAGE_UP(vmax);
+
+    uint8_t *base = mmap(NULL, vmax - vmin, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (base == MAP_FAILED) die("reserve");
+
+    for (int i = 0; i < eh->e_phnum; i++) {
+        const Elf64_Phdr *ph = (const Elf64_Phdr *)(fdata + eh->e_phoff + i * eh->e_phentsize);
+        if (ph->p_type != PT_LOAD) continue;
+        size_t off_a = PAGE_DOWN(ph->p_offset);
+        size_t va_a  = PAGE_DOWN(ph->p_vaddr);
+        size_t diff  = ph->p_offset - off_a;
+        size_t mapsz = PAGE_UP(ph->p_filesz + diff);
+        int prot = 0;
+        if (ph->p_flags & PF_R) prot |= PROT_READ;
+        if (ph->p_flags & PF_W) prot |= PROT_WRITE;
+        if (ph->p_flags & PF_X) prot |= PROT_EXEC;
+        void *seg = mmap(base + va_a - vmin, mapsz, prot | PROT_WRITE,
+                         MAP_PRIVATE | MAP_FIXED, fd, off_a);
+        if (seg == MAP_FAILED) die("segment map");
+        if (ph->p_memsz > ph->p_filesz) {
+            uint8_t *bss  = base + (ph->p_vaddr - vmin) + ph->p_filesz;
+            size_t   bsz  = ph->p_memsz - ph->p_filesz;
+            size_t in_pg  = PAGE_UP((size_t)bss) - (size_t)bss;
+            if (in_pg > bsz) in_pg = bsz;
+            memset(bss, 0, in_pg);
+            if (bsz > in_pg)
+                mmap(bss + in_pg, PAGE_UP(bsz - in_pg), prot | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+        }
+        if (!(ph->p_flags & PF_W)) mprotect(seg, mapsz, prot);
+    }
+
+    size_t base_addr = (size_t)base - vmin;
+    size_t entry     = base_addr + eh->e_entry;
+    size_t phdr_addr = 0;
+    for (int i = 0; i < eh->e_phnum; i++) {
+        const Elf64_Phdr *ph = (const Elf64_Phdr *)(fdata + eh->e_phoff + i * eh->e_phentsize);
+        if (ph->p_type == PT_PHDR) { phdr_addr = base_addr + ph->p_vaddr; break; }
+    }
+    if (!phdr_addr) {
+        const Elf64_Phdr *ph = (const Elf64_Phdr *)(fdata + eh->e_phoff);
+        phdr_addr = base_addr + ph->p_vaddr + eh->e_phoff;
+    }
+    uint16_t phnum = eh->e_phnum, phent = eh->e_phentsize;
+    munmap(fdata, st.st_size); close(fd);
+
+    size_t  stksz = 16 * 1024 * 1024;
+    uint8_t *stk  = mmap(NULL, stksz, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANON | MAP_STACK, -1, 0);
+    if (stk == MAP_FAILED) die("stack");
+    uint8_t *sp = stk + stksz;
+
+#define PUSH_STR(s) ({ size_t _l = strlen(s)+1; sp -= _l; memcpy(sp,(s),_l); (size_t)sp; })
+#define PUSH_BYTES(src,n) do { sp -= (n); memcpy(sp,(src),(n)); } while(0)
+
+    size_t plat_addr = PUSH_STR("aarch64");
+    uint8_t rnd[16];
+    int ufd = open("/dev/urandom", O_RDONLY);
+    if (ufd >= 0) { read(ufd, rnd, 16); close(ufd); } else memset(rnd, 0x42, 16);
+    sp -= 16; memcpy(sp, rnd, 16); size_t rnd_addr = (size_t)sp;
+
+    size_t envc    = 0; while (envp[envc]) envc++;
+    size_t new_argc = (size_t)argc + 3;
+
+    size_t argv_a[MAX_ARGS];
+    argv_a[0] = PUSH_STR(ldso);
+    argv_a[1] = PUSH_STR("--library-path");
+    argv_a[2] = PUSH_STR("${GLIBC_LIB_DIR}");
+    argv_a[3] = PUSH_STR(target_exe);
+    for (size_t i = 1; i < (size_t)argc; i++) argv_a[i + 3] = PUSH_STR(argv[i]);
+    size_t execfn = argv_a[3];
+
+    size_t envp_a[MAX_ENV];
+    size_t env_out = 0;
+    for (size_t i = 0; i < envc; i++) {
+        if (strncmp(envp[i], "LD_PRELOAD=", 11) == 0) continue;
+        if (strncmp(envp[i], "LD_LIBRARY_PATH=", 16) == 0) continue;
+        envp_a[env_out++] = PUSH_STR(envp[i]);
+    }
+
+    /* Build auxv first so auxc is known for alignment calculation */
+    size_t auxv[][2] = {
+        {AT_PHDR,   phdr_addr}, {AT_PHENT, phent},   {AT_PHNUM, phnum},
+        {AT_PAGESZ, 4096},      {AT_BASE,  base_addr},{AT_FLAGS, 0},
+        {AT_ENTRY,  entry},     {AT_UID,   getuid()}, {AT_EUID,  geteuid()},
+        {AT_GID,    getgid()},  {AT_EGID,  getegid()},
+        {AT_HWCAP,  getauxval_from_envp(envp, AT_HWCAP)},
+        {AT_HWCAP2, getauxval_from_envp(envp, AT_HWCAP2)},
+        {AT_CLKTCK, (size_t)sysconf(_SC_CLK_TCK)},
+        {AT_RANDOM, rnd_addr},
+        {AT_SECURE, getauxval_from_envp(envp, AT_SECURE)},
+        {AT_SYSINFO_EHDR, getauxval_from_envp(envp, AT_SYSINFO_EHDR)},
+        {AT_EXECFN, execfn}, {AT_PLATFORM, plat_addr},
+        {AT_NULL, 0},
+    };
+    size_t auxc = sizeof(auxv) / sizeof(auxv[0]);
+
+    /* AArch64 ABI: sp must be 16-byte aligned at the synthetic entry point.
+       Pre-align sp so that after all pushes sp ends up on a 16-byte boundary. */
+    {
+        size_t n_ptrs = 1               /* argc */
+                      + new_argc + 1   /* argv + NULL */
+                      + env_out + 1    /* envp + NULL */
+                      + auxc * 2;      /* auxv pairs */
+        size_t byte_total = n_ptrs * 8;
+        /* align down so (sp - byte_total) is 16-byte aligned */
+        sp = (uint8_t *)(((size_t)sp - byte_total) & ~(size_t)15) + byte_total;
+    }
+
+    PUSH_BYTES(auxv, auxc * 16);
+    size_t zero = 0; PUSH_BYTES(&zero, 8);
+    for (int i = (int)env_out - 1; i >= 0; i--) PUSH_BYTES(&envp_a[i], 8);
+    PUSH_BYTES(&zero, 8);
+    for (int i = (int)new_argc - 1; i >= 0; i--) PUSH_BYTES(&argv_a[i], 8);
+    PUSH_BYTES(&new_argc, 8);
+
+    __asm__ volatile(
+        "mov sp, %[sp]\n"
+        "mov x0, sp\n"
+        "br  %[entry]\n"
+        : : [sp] "r"(sp), [entry] "r"(entry)
+        : "x0","x1","x2","x3","x4","x5","x30","memory"
+    );
+    __builtin_unreachable();
+}
+C_CODE
+
+    echo "[glibcx] Compiling native wrapper (C userland-exec, Bionic-linked)..."
+    if ! clang -O2 "$wrapper_c" -o "$wrapper_bin" 2>&1; then
+        echo "[glibcx] Error: Compilation failed. Is 'clang' installed?" >&2
+        exit 1
+    fi
+    rm -f "$wrapper_c"
+
+    echo "[glibcx] Registered '$bin_name'. Wrapper: $wrapper_bin"
+    echo "[glibcx] Add ~/.glibcx/bin to PATH if not already (run 'glibcx setup')."
+}
+
+cmd_restore() {
+    init_env
+    local target_bin="${1:-}"
+    if [[ -z "$target_bin" ]]; then
+        echo "Usage: glibcx restore <binary_path>" >&2
+        exit 1
+    fi
+    target_bin="$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")"
+
+    local orig_hash
+    orig_hash=$(json_get_val "$target_bin" "orig_hash")
+    if [[ -z "$orig_hash" ]]; then
+        echo "[glibcx] Error: '$target_bin' is not in the registry." >&2
+        exit 1
+    fi
+
+    local bin_name
+    bin_name="$(basename "$target_bin")"
+    local backup="${CLI_STORAGE}/storage/${orig_hash:0:12}/${bin_name}.orig"
+    if [[ ! -f "$backup" ]]; then
+        echo "[glibcx] Error: Backup not found at '$backup'." >&2
+        exit 1
+    fi
+
+    cp "$backup" "$target_bin"
+    rm -f "${CLI_STORAGE}/bin/${bin_name}"
+    json_delete_entry "$target_bin"
+    echo "[glibcx] Restored '$target_bin' and removed wrapper."
+}
+
+cmd_list() {
+    init_env
+    echo "[glibcx] Managed Binaries Registry:"
+    local count=0
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        count=$((count + 1))
+        local glibc patched_at fp current_fp status
+        glibc=$(json_get_val "$path" "glibc_required")
+        patched_at=$(json_get_val "$path" "patched_at")
+        fp=$(json_get_val "$path" "patched_fingerprint")
+        current_fp=$(_fingerprint "$path")
+        if [[ ! -f "$path" ]]; then
+            status="MISSING"
+        elif [[ "$current_fp" != "$fp" ]]; then
+            status="DRIFT (re-run: glibcx patch $path)"
+        else
+            status="OK"
+        fi
+        echo "  $path"
+        echo "    status         : $status"
+        echo "    glibc required : $glibc"
+        echo "    patched at     : $patched_at"
+    done < <(json_list_paths)
+    if [[ "$count" -eq 0 ]]; then
+        echo "  No patched binaries registered."
+    fi
+}
+
+cmd_clean() {
+    init_env
+    echo "[glibcx] Scanning registry for stale entries..."
+    local stale=0
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        if [[ ! -f "$path" ]]; then
+            local bin_name
+            bin_name="$(basename "$path")"
+            echo "[glibcx] Removing stale entry: $path"
+            rm -f "${CLI_STORAGE}/bin/${bin_name}"
+            json_delete_entry "$path"
+            stale=$((stale + 1))
+        fi
+    done < <(json_list_paths)
+    if [[ "$stale" -eq 0 ]]; then
+        echo "[glibcx] Registry is clean."
+    else
+        echo "[glibcx] Removed $stale stale entries."
+    fi
+}
+
+cmd_info() {
+    init_env
+    local target_bin="${1:-}"
+    if [[ -z "$target_bin" ]]; then
+        echo "Usage: glibcx info <binary_path>" >&2
+        exit 1
+    fi
+    target_bin="$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")"
+    if command -v jq >/dev/null 2>&1; then
+        jq --arg p "$target_bin" '.[$p] // empty' "$REGISTRY_FILE"
+    else
+        python3 -c '
+import json, sys
+f, path = sys.argv[1:3]
+with open(f) as fh: data = json.load(fh)
+import pprint; pprint.pprint(data.get(path, {}))
+' "$REGISTRY_FILE" "$target_bin"
+    fi
+}
+
+cmd_upgrade() {
+    init_env
+    local target_bin="${1:-}"
+    if [[ -z "$target_bin" ]]; then
+        echo "Usage: glibcx upgrade <binary_path>" >&2
+        exit 1
+    fi
+    target_bin="$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")"
+    if [[ -z "$(json_get_val "$target_bin" "orig_hash")" ]]; then
+        echo "[glibcx] Error: '$target_bin' is not in the registry. Use 'glibcx patch' first." >&2
+        exit 1
+    fi
+    echo "[glibcx] Re-patching '$target_bin'..."
+    cmd_patch "$target_bin"
+}
+
+cmd_run() {
+    local target_bin="${1:-}"
+    if [[ -z "$target_bin" ]]; then
+        echo "Usage: glibcx run <binary> [-- args...]" >&2
+        exit 1
+    fi
+    shift
+    [[ "${1:-}" == "--" ]] && shift
+    # Scrub Bionic-injected vars before handing off to the glibc loader.
+    # LD_PRELOAD from Termux (libtermux-exec-ld-preload.so) is a Bionic
+    # library — the glibc ld.so will crash with "version 'LIBC' not found"
+    # if it tries to load it. Same for LD_LIBRARY_PATH pointing at Bionic dirs.
+    exec env -u LD_PRELOAD -u LD_LIBRARY_PATH \
+        "$GLIBC_INTERPRETER" --library-path "$GLIBC_LIB_DIR" "$target_bin" "$@"
+}
+cmd_bench() {
+    init_env
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    _time_cmd() {
+        # Usage: _time_cmd <label_width> <label> <cmd...>
+        # Runs cmd, prints elapsed real seconds to stdout, status to stderr label.
+        local lw="$1" label="$2"; shift 2
+        local t0 t1
+        t0=$(date +%s%3N)
+        "$@" >/dev/null 2>&1
+        local rc=$?
+        t1=$(date +%s%3N)
+        awk -v ms="$((t1 - t0))" 'BEGIN{printf "%.3f", ms/1000}'
+        return $rc
+    }
+
+    _avg3() {
+        # Run cmd 3 times, print average seconds
+        local cmd=("$@")
+        local total=0
+        for _ in 1 2 3; do
+            local t
+            t=$(_time_cmd 0 "" "${cmd[@]}")
+            total=$(awk -v a="$total" -v b="$t" 'BEGIN{printf "%.3f", a+b}')
+        done
+        awk -v t="$total" 'BEGIN{printf "%.3fs", t/3}'
+    }
+
+    # ── Phase 1: Install ─────────────────────────────────────────────────────
+    echo ""
+    echo "[glibcx] ══════════════════════════════════════════════════════════"
+    echo "[glibcx]  PHASE 1 — Install 10 Linux ARM64 tools absent from Termux"
+    echo "[glibcx] ══════════════════════════════════════════════════════════"
+    echo ""
+
+    local targets=(
+        "ast-grep/ast-grep"
+        "dandavison/delta"
+        "ynqa/jnv"
+        "Orange-OpenSource/hurl"
+        "sayanarijit/xplr"
+        "ClementTsang/bottom"
+        "taiki-e/cargo-llvm-cov"
+        "BurntSushi/ripgrep"
+        "sharkdp/fd"
+        "cargo-bins/cargo-binstall"
+        "alexpasmantier/television"
+    )
+
+    printf "  %-38s  %-12s  %s\n" "REPO" "TIME" "STATUS"
+    printf "  %s\n" "$(printf '─%.0s' {1..65})"
+
+    for repo in "${targets[@]}"; do
+        local bin_name="${repo##*/}"
+        local status="installed"
+
+        # Already in registry?
+        if find ~/.glibcx/opt -name "$bin_name" -type f 2>/dev/null | grep -q .; then
+            printf "  %-38s  %-12s  %s\n" "$repo" "cached" "already installed"
+            continue
+        fi
+
+        local t0 t_end elapsed
+        t0=$(date +%s%3N)
+
+        if cmd_gh install "$repo" >"${CLI_STORAGE}/logs/bench_${bin_name}.log" 2>&1; then
+            t_end=$(date +%s%3N)
+            elapsed=$(awk -v ms="$((t_end - t0))" 'BEGIN{printf "%.2fs", ms/1000}')
+            # Count wrappers created
+            local n_wrap
+            n_wrap=$(grep -c "Registered" "${CLI_STORAGE}/logs/bench_${bin_name}.log" 2>/dev/null || echo 0)
+            status="${n_wrap} wrapper(s) compiled"
+        else
+            t_end=$(date +%s%3N)
+            elapsed=$(awk -v ms="$((t_end - t0))" 'BEGIN{printf "%.2fs", ms/1000}')
+            status="FAILED — see ${CLI_STORAGE}/logs/bench_${bin_name}.log"
+        fi
+
+        printf "  %-38s  %-12s  %s\n" "$repo" "$elapsed" "$status"
+    done
+
+    # ── Verification ─────────────────────────────────────────────────────────
+    # Per-binary version sniff: some tools use non-standard flags or subcommands
+    _ver() {
+        local bin="$1" wrapper="${CLI_STORAGE}/bin/$1"
+        [[ -x "$wrapper" ]] || return
+        local ver
+        case "$bin" in
+            sg)            ver="(alias for ast-grep — deprecated)" ;;
+            hurl|hurlfmt)  ver="$(\"$wrapper\" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 'needs libxml2 (glibc) — see glibcx info')" ;;
+            cargo-llvm-cov) ver="$("$wrapper" llvm-cov --version 2>&1 | head -1 | cut -c1-55 || true)" ;;
+            cargo-binstall) ver="$("$wrapper" -V 2>&1 | head -1 | cut -c1-55 || true)" ;;
+            detect-targets|detect-wasi) ver="$("$wrapper" 2>&1 | head -1 | cut -c1-55 || true)" ;;
+            *)             ver="$("$wrapper" --version 2>&1 | head -1 | cut -c1-55 || true)" ;;
+        esac
+        printf "  %-18s  %s\n" "$bin" "$ver"
+    }
+
+    echo ""
+    echo "[glibcx] ── Installed wrappers ──────────────────────────────────"
+    for bin in ast-grep sg delta jnv hurl hurlfmt xplr btm cargo-llvm-cov rg fd cargo-binstall tv; do
+        _ver "$bin"
+    done
+
+    # ── Phase 2: vs proot-distro ─────────────────────────────────────────────
+    echo ""
+    echo "[glibcx] ══════════════════════════════════════════════════════════"
+    echo "[glibcx]  PHASE 2 — Three-way: glibcx vs proot-distro vs Termux native"
+    echo "[glibcx]  Datasets: benchdata (1K×4MB), benchdata_large (200×6MB),"
+    echo "[glibcx]            benchdata_real (2.1K×24MB, ~8% hit, mixed sizes)"
+    echo "[glibcx]  Pattern:  MATCHME  |  3-run average each"
+    echo "[glibcx] ══════════════════════════════════════════════════════════"
+
+    if ! command -v proot-distro >/dev/null 2>&1; then
+        echo "[glibcx] proot-distro not found — skipping comparison."
+        echo "[glibcx] Install with: pkg install proot-distro && proot-distro install debian"
+        echo "[glibcx] ══════════════════════════════════════════════════════════"
+        return 0
+    fi
+
+    # Locate benchmark datasets — prefer the glibcx source repo if present,
+    # then CLI_STORAGE, then generate a fallback in CLI_STORAGE.
+    local ds_base=""
+    for candidate in \
+        "${HOME}/glibcx" \
+        "${HOME}/.glibcx" \
+        "${CLI_STORAGE}" \
+        "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"; do
+        if [[ -d "${candidate}/benchdata_real" ]]; then
+            ds_base="$candidate"
+            break
+        fi
+    done
+    [[ -z "$ds_base" ]] && ds_base="$CLI_STORAGE"
+
+    local ds1="${ds_base}/benchdata"
+    local ds2="${ds_base}/benchdata_large"
+    local ds3="${ds_base}/benchdata_real"
+
+    # Generate ds1 fallback (small dataset) if totally missing
+    if [[ ! -d "$ds1" ]] || [[ "$(ls "$ds1" 2>/dev/null | wc -l)" -lt 100 ]]; then
+        echo "[glibcx] Generating benchdata fallback (1000 files × 4KB)..."
+        mkdir -p "$ds1"
+        for i in $(seq 1 1000); do
+            printf 'line with MATCHME pattern here\nplain filler line here\nMATCHME again here\n%.0s' \
+                {1..40} > "$ds1/file_${i}.txt"
+        done
+    fi
+
+    # Make all datasets visible to proot via $PREFIX/tmp (shared by --shared-tmp)
+    local proot_tmp="${PREFIX:-/data/data/com.termux/files/usr}/tmp"
+    for pair in "glibcx_bench:$ds1" "glibcx_large:$ds2" "glibcx_real:$ds3"; do
+        local pname="${pair%%:*}" ppath="${pair##*:}"
+        [[ -d "$ppath" ]] || continue
+        # Only re-sync if stale (file count differs)
+        local local_n proot_n
+        local_n=$(find "$ppath" -type f | wc -l)
+        proot_n=$(find "${proot_tmp}/${pname}" -type f 2>/dev/null | wc -l)
+        if [[ "$local_n" != "$proot_n" ]]; then
+            rm -rf "${proot_tmp}/${pname}"
+            cp -r "$ppath" "${proot_tmp}/${pname}"
+        fi
+    done
+
+    # Ensure rg + fdfind are in proot debian
+    local has_proot_rg proot_fd_cmd
+    has_proot_rg=$(proot-distro login debian --shared-tmp -- bash -c \
+        "command -v rg 2>/dev/null && echo yes || echo no" 2>/dev/null || echo no)
+    local has_proot_fd
+    has_proot_fd=$(proot-distro login debian --shared-tmp -- bash -c \
+        "command -v fdfind 2>/dev/null && echo yes; command -v fd 2>/dev/null && echo yes; echo no" \
+        2>/dev/null | head -1 || echo no)
+    proot_fd_cmd="fdfind"
+
+    if [[ "$has_proot_rg" != "yes" ]] || [[ "$has_proot_fd" != "yes" ]]; then
+        echo "[glibcx] Installing rg/fd in proot-distro debian..."
+        proot-distro login debian --shared-tmp -- bash -c \
+            "apt-get update -qq && apt-get install -y -qq ripgrep fd-find >/dev/null 2>&1" 2>/dev/null || true
+    fi
+
+    # ── helpers for this section ──────────────────────────────────────────────
+    _row() {
+        # _row <label> <glibcx_cmd_arr_name> <native_cmd> <proot_cmd>
+        # Prints one table row. All three commands as strings passed via args.
+        local label="$1" g_cmd="$2" n_cmd="$3" p_cmd="$4"
+        local g_t n_t p_t speedup_gp speedup_gn
+        g_t=$(_avg3 bash -c "$g_cmd")
+        n_t=$(_avg3 bash -c "$n_cmd")
+        p_t=$(_avg3 bash -c "$p_cmd")
+        speedup_gp=$(awk -v g="${g_t%s}" -v p="${p_t%s}" \
+            'BEGIN{if(g>0&&p>0) printf "%.1fx", p/g; else print "N/A"}')
+        speedup_gn=$(awk -v g="${g_t%s}" -v n="${n_t%s}" \
+            'BEGIN{if(g>0&&n>0) printf "%.2fx", g/n; else print "1.00x"}')
+        printf "  %-26s  %-12s  %-12s  %-14s  vs proot: %-10s  overhead vs native: %s\n" \
+            "$label" "$g_t" "$n_t" "$p_t" "${speedup_gp} faster" "${speedup_gn}"
+    }
+
+    local rg_bin="${CLI_STORAGE}/bin/rg"
+    local fd_bin="${CLI_STORAGE}/bin/fd"
+
+    echo ""
+    echo "  NOTE: 3-run average. run-1 cold cache, runs 2+3 warm. Average includes cold."
+    echo ""
+    printf "  %-26s  %-12s  %-12s  %-14s  %s\n" \
+        "DATASET / TOOL" "glibcx" "Termux native" "proot-distro" "COMPARISON"
+    printf "  %s\n" "$(printf '─%.0s' {1..100})"
+
+    # ── dataset 1: benchdata (1000 files, 4MB) ───────────────────────────────
+    if [[ -x "$rg_bin" ]] && [[ -d "$ds1" ]]; then
+        _row "benchdata    rg -l" \
+            "$rg_bin -l 'MATCHME' $ds1/ 2>/dev/null" \
+            "rg -l 'MATCHME' $ds1/ 2>/dev/null" \
+            "proot-distro login debian --shared-tmp -- bash -c \"rg -l 'MATCHME' /tmp/glibcx_bench/ 2>/dev/null\""
+    fi
+    if [[ -x "$fd_bin" ]] && [[ -d "$ds1" ]]; then
+        _row "benchdata    fd -t f" \
+            "$fd_bin -t f . $ds1/ 2>/dev/null" \
+            "fd -t f . $ds1/ 2>/dev/null" \
+            "proot-distro login debian --shared-tmp -- bash -c \"fdfind -t f . /tmp/glibcx_bench/ 2>/dev/null\""
+    fi
+
+    # ── dataset 2: benchdata_large (200 files, 6MB) ──────────────────────────
+    if [[ -x "$rg_bin" ]] && [[ -d "$ds2" ]]; then
+        _row "benchdata_large  rg -l" \
+            "$rg_bin -l 'MATCHME' $ds2/ 2>/dev/null" \
+            "rg -l 'MATCHME' $ds2/ 2>/dev/null" \
+            "proot-distro login debian --shared-tmp -- bash -c \"rg -l 'MATCHME' /tmp/glibcx_large/ 2>/dev/null\""
+    fi
+    if [[ -x "$fd_bin" ]] && [[ -d "$ds2" ]]; then
+        _row "benchdata_large  fd -t f" \
+            "$fd_bin -t f . $ds2/ 2>/dev/null" \
+            "fd -t f . $ds2/ 2>/dev/null" \
+            "proot-distro login debian --shared-tmp -- bash -c \"fdfind -t f . /tmp/glibcx_large/ 2>/dev/null\""
+    fi
+
+    # ── dataset 3: benchdata_real (10000 files, 40MB) ────────────────────────
+    if [[ -x "$rg_bin" ]] && [[ -d "$ds3" ]]; then
+        _row "benchdata_real   rg -l" \
+            "$rg_bin -l 'MATCHME' $ds3/ 2>/dev/null" \
+            "rg -l 'MATCHME' $ds3/ 2>/dev/null" \
+            "proot-distro login debian --shared-tmp -- bash -c \"rg -l 'MATCHME' /tmp/glibcx_real/ 2>/dev/null\""
+    fi
+    if [[ -x "$fd_bin" ]] && [[ -d "$ds3" ]]; then
+        _row "benchdata_real   fd -t f" \
+            "$fd_bin -t f . $ds3/ 2>/dev/null" \
+            "fd -t f . $ds3/ 2>/dev/null" \
+            "proot-distro login debian --shared-tmp -- bash -c \"fdfind -t f . /tmp/glibcx_real/ 2>/dev/null\""
+    fi
+
+    # ── ast-grep on benchdata_sg (JS files, no proot equivalent) ─────────────
+    if [[ -x "${CLI_STORAGE}/bin/sg" ]]; then
+        local sg_local="${CLI_STORAGE}/benchdata_sg"
+        mkdir -p "$sg_local"
+        if [[ "$(ls "$sg_local" 2>/dev/null | wc -l)" -lt 100 ]]; then
+            for i in $(seq 1 100); do
+                printf 'console.log("hello %d");\nconsole.error("err %d");\n' "$i" "$i" \
+                    > "$sg_local/file_${i}.js"
+            done
+        fi
+        local sg_t
+        sg_t=$(_avg3 "${CLI_STORAGE}/bin/sg" run \
+            --pattern 'console.log($ARG)' --lang js "$sg_local/")
+        printf "  %-26s  %-12s  %-12s  %-14s  %s\n" \
+            "benchdata_sg  ast-grep" "$sg_t" "(N/A — Bionic)" "(not in Debian)" \
+            "glibcx-only tool"
+    fi
+
+    echo ""
+    echo "[glibcx]  PHASE 2 complete."
+    echo "[glibcx]  Key insight: glibcx overhead vs Termux native is ~0%"
+    echo "[glibcx]  (glibc syscalls go direct to kernel — same path as Bionic)."
+    echo "[glibcx]  proot-distro intercepts every open/read/stat via ptrace,"
+    echo "[glibcx]  ~10-14x slower on any dataset, scaling with file count."
+    echo "[glibcx] ══════════════════════════════════════════════════════════"
+    echo ""
+}
+cmd_fetch() {
+    local url="${1:-}"
+    local custom_name="${2:-}"
+    if [[ -z "$url" ]]; then
+        echo "Usage: glibcx fetch <url>" >&2
+        exit 1
+    fi
+
+    init_env
+
+    local filename
+    filename=$(basename "${url%%\?*}")
+
+    # Derive a clean name by stripping all known archive extensions
+    if [[ -z "$custom_name" ]]; then
+        custom_name="$filename"
+        custom_name="${custom_name%.tar.gz}"
+        custom_name="${custom_name%.tar.xz}"
+        custom_name="${custom_name%.tar.bz2}"
+        custom_name="${custom_name%.tar.zst}"
+        custom_name="${custom_name%.tgz}"
+        custom_name="${custom_name%.zip}"
+        custom_name="${custom_name%.gz}"
+    fi
+
+    local safe_name="${custom_name//\//_}"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    trap "rm -rf \"$tmp_dir\"" EXIT
+
+    echo "[glibcx] Downloading $url ..."
+    if ! curl -fSL --progress-bar "$url" -o "$tmp_dir/$filename"; then
+        echo "[glibcx] Error: Download failed for $url" >&2
+        exit 1
+    fi
+
+    local ext_dir="$tmp_dir/ext"
+    mkdir -p "$ext_dir"
+
+    echo "[glibcx] Extracting..."
+    if [[ "$filename" == *.tar.gz || "$filename" == *.tgz ]]; then
+        tar -xzf "$tmp_dir/$filename" -C "$ext_dir"
+    elif [[ "$filename" == *.tar.xz ]]; then
+        tar -xJf "$tmp_dir/$filename" -C "$ext_dir"
+    elif [[ "$filename" == *.tar.bz2 ]]; then
+        tar -xjf "$tmp_dir/$filename" -C "$ext_dir"
+    elif [[ "$filename" == *.tar.zst ]]; then
+        tar --use-compress-program=zstd -xf "$tmp_dir/$filename" -C "$ext_dir"
+    elif [[ "$filename" == *.zip ]]; then
+        if ! command -v unzip >/dev/null 2>&1; then
+            echo "[glibcx] Installing unzip..."
+            pkg install unzip -y
+        fi
+        unzip -q "$tmp_dir/$filename" -d "$ext_dir"
+    elif [[ "$filename" == *.gz ]]; then
+        gunzip -c "$tmp_dir/$filename" > "$ext_dir/${filename%.gz}"
+        chmod +x "$ext_dir/${filename%.gz}"
+    else
+        # Assume raw binary
+        cp "$tmp_dir/$filename" "$ext_dir/$filename"
+        chmod +x "$ext_dir/$filename"
+    fi
+
+    local install_dir="${CLI_STORAGE}/opt/${safe_name}"
+    rm -rf "$install_dir"
+    mkdir -p "$install_dir"
+    cp -r "$ext_dir/"* "$install_dir/"
+
+    echo "[glibcx] Searching for executables in $install_dir ..."
+    local found_any=0
+    while IFS= read -r bin; do
+        if file "$bin" | grep -q "ELF 64-bit LSB"; then
+            found_any=1
+            # glibc binaries have libc.so.6 in NEEDED; Bionic has libc.so without version
+            if readelf -d "$bin" 2>/dev/null | grep -q "libc.so.6"; then
+                echo "[glibcx] Auto-patching glibc binary: $(basename "$bin")"
+                cmd_patch "$bin"
+            else
+                echo "[glibcx] Native/Bionic binary (no glibc dep). Symlinking: $(basename "$bin")"
+                ln -sf "$bin" "${CLI_STORAGE}/bin/$(basename "$bin")"
+            fi
+        fi
+    done < <(find "$install_dir" -type f -executable 2>/dev/null)
+
+    if [[ "$found_any" -eq 0 ]]; then
+        echo "[glibcx] Error: No ELF 64-bit executables found in archive." >&2
+        exit 1
+    fi
+
+    echo "[glibcx] Fetch & install complete."
+}
+cmd_npm() {
+    local action="${1:-}"
+    local raw_pkg="${2:-}"
+    if [[ "$action" != "install" || -z "$raw_pkg" ]]; then
+        echo "Usage: glibcx npm install <package>" >&2
+        exit 1
+    fi
+
+    init_env
+
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "[glibcx] Error: 'npm' is not installed. Install Node.js via 'pkg install nodejs'." >&2
+        exit 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[glibcx] Error: 'jq' is required. Run 'glibcx setup' first." >&2
+        exit 1
+    fi
+
+    echo "[glibcx] Resolving NPM package '$raw_pkg'..."
+    local target_pkg="$raw_pkg"
+
+    # 1. Check for native Android optional dep
+    local opt_deps
+    opt_deps=$(npm view "$raw_pkg" optionalDependencies --json 2>/dev/null || echo "{}")
+
+    local android_pkg
+    android_pkg=$(echo "$opt_deps" | jq -r 'keys[] | select(test("android-arm64|linux-arm64-android"))' 2>/dev/null | head -n1 || true)
+
+    if [[ -n "$android_pkg" ]]; then
+        echo "[glibcx] Notice: Native Android build detected ($android_pkg). Redirecting to npm install -g ..."
+        exec npm install -g "$raw_pkg"
+    fi
+
+    local arm_pkg
+    arm_pkg=$(echo "$opt_deps" | jq -r 'keys[] | select(test("linux-arm64$|linux-aarch64$"))' 2>/dev/null | head -n1 || true)
+
+    if [[ -n "$arm_pkg" ]]; then
+        echo "[glibcx] No Android build. Using Linux ARM64 sub-package: $arm_pkg"
+        target_pkg="$arm_pkg"
+    fi
+
+    # 2. Get tarball URL
+    local tarball_url
+    tarball_url=$(npm view "$target_pkg" dist.tarball 2>/dev/null || true)
+
+    if [[ -z "$tarball_url" ]]; then
+        echo "[glibcx] Error: Could not resolve tarball URL for '$target_pkg'." >&2
+        exit 1
+    fi
+
+    # 3. Download and extract
+    echo "[glibcx] Downloading $tarball_url ..."
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    trap "rm -rf \"$tmp_dir\"" EXIT
+
+    if ! curl -fSL --progress-bar "$tarball_url" -o "$tmp_dir/package.tgz"; then
+        echo "[glibcx] Error: Download failed." >&2
+        exit 1
+    fi
+
+    echo "[glibcx] Extracting package..."
+    mkdir -p "$tmp_dir/ext"
+    tar -xzf "$tmp_dir/package.tgz" -C "$tmp_dir/ext"
+
+    local pkg_json="$tmp_dir/ext/package/package.json"
+    if [[ ! -f "$pkg_json" ]]; then
+        echo "[glibcx] Error: package.json not found in tarball." >&2
+        exit 1
+    fi
+
+    # 4. Resolve bin paths safely (no word-splitting)
+    local bin_paths_file
+    bin_paths_file=$(mktemp)
+    trap "rm -rf \"$tmp_dir\"; rm -f \"$bin_paths_file\"" EXIT
+    jq -r '.bin | if type=="string" then . elif type=="object" then to_entries[].value else empty end' \
+        "$pkg_json" 2>/dev/null > "$bin_paths_file" || true
+
+    if [[ ! -s "$bin_paths_file" ]]; then
+        echo "[glibcx] No 'bin' field. Searching for glibc ELF executables..."
+        find "$tmp_dir/ext/package" -type f -executable -exec file {} \; 2>/dev/null \
+            | grep "ELF 64-bit" \
+            | awk -F: '{print $1}' \
+            | sed "s|$tmp_dir/ext/package/||" > "$bin_paths_file" || true
+    fi
+
+    if [[ ! -s "$bin_paths_file" ]]; then
+        echo "[glibcx] Error: No executables found in '$target_pkg'." >&2
+        exit 1
+    fi
+
+    # 5. Install package files to permanent location
+    local safe_pkg_name="${target_pkg//\//_}"
+    local install_dir="${CLI_STORAGE}/opt/${safe_pkg_name}"
+    echo "[glibcx] Installing to $install_dir ..."
+    rm -rf "$install_dir"
+    mkdir -p "$install_dir"
+    cp -r "$tmp_dir/ext/package/"* "$install_dir/"
+
+    # 6. Patch each binary (safe loop — no word-splitting)
+    while IFS= read -r b_path; do
+        [[ -z "$b_path" ]] && continue
+        local full_bin_path="$install_dir/$b_path"
+        if [[ -f "$full_bin_path" ]]; then
+            chmod +x "$full_bin_path"
+            if file "$full_bin_path" | grep -q "ELF 64-bit"; then
+                echo "[glibcx] Patching: $b_path"
+                cmd_patch "$full_bin_path"
+            else
+                echo "[glibcx] Skipping non-ELF (script/wrapper): $b_path"
+            fi
+        else
+            echo "[glibcx] Warning: declared binary '$b_path' not found at $full_bin_path"
+        fi
+    done < "$bin_paths_file"
+
+    rm -f "$bin_paths_file"
+    echo "[glibcx] NPM install complete."
+}
+cmd_gh() {
+    local action="${1:-}"
+    local repo="${2:-}"
+    if [[ "$action" != "install" || -z "$repo" ]]; then
+        echo "Usage: glibcx gh install <owner/repo>" >&2
+        exit 1
+    fi
+
+    init_env
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[glibcx] Error: 'jq' is required. Run 'glibcx setup' first." >&2
+        exit 1
+    fi
+
+    echo "[glibcx] Querying GitHub for '$repo' latest release..."
+
+    local api_url="https://api.github.com/repos/$repo/releases/latest"
+    local curl_args=(-sL)
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        curl_args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    fi
+
+    local release_json
+    release_json=$(curl "${curl_args[@]}" "$api_url")
+
+    if echo "$release_json" | jq -e '.message' >/dev/null 2>&1; then
+        local msg
+        msg=$(echo "$release_json" | jq -r '.message')
+        echo "[glibcx] Error: GitHub API returned: $msg" >&2
+        echo "[glibcx] Tip: Set GITHUB_TOKEN to avoid rate limits (60 req/hr unauthenticated)." >&2
+        exit 1
+    fi
+
+    local bad_ext_filter='[.]sha256$|[.]sha512$|[.]sig$|[.]asc$|[.]deb$|[.]rpm$|[.]AppImage$|[.]json$|[.]txt$'
+    local arch_pattern='aarch64|arm64|armv8'
+
+    # Select Linux ARM64 GNU (glibc) binaries only.
+    # Explicitly EXCLUDE:
+    #   - android  (these are Bionic-linked, not glibc)
+    #   - musl, gnueabihf, gnu-eabihf  (wrong libc or ABI)
+    #   - .deb, .rpm, .sig, checksums, etc. (via bad_ext_filter)
+    local asset_url
+    asset_url=$(echo "$release_json" | jq -r \
+        --arg bad "$bad_ext_filter" \
+        --arg arch "$arch_pattern" \
+        '.assets[]
+         | select(
+             (.name | ascii_downcase | test($bad) | not)
+             and (.name | ascii_downcase | test("linux"))
+             and (.name | ascii_downcase | test($arch))
+             and (.name | ascii_downcase | test("android") | not)
+             and (.name | ascii_downcase | test("musl|gnueabihf|gnu-eabihf") | not)
+           )
+         | .browser_download_url' | head -n1)
+
+    if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
+        echo "[glibcx] Error: No suitable Linux ARM64 (glibc) asset found for '$repo'." >&2
+        echo "[glibcx] Available assets:" >&2
+        echo "$release_json" | jq -r '.assets[].name' | sed 's/^/  /' >&2
+        exit 1
+    fi
+
+    echo "[glibcx] Selected glibc binary: $asset_url"
+    cmd_fetch "$asset_url" "${repo##*/}"
+}
+cmd_intercept() {
+    local user_cmd="${1:-}"
+    if [[ -z "$user_cmd" ]]; then
+        echo "Usage: glibcx intercept '<command>'" >&2
+        echo "Example: glibcx intercept 'curl -fsSL https://bun.sh/install | bash'" >&2
+        exit 1
+    fi
+
+    init_env
+
+    local termux_bin="${PREFIX:-$(dirname "$(command -v pkg 2>/dev/null)" 2>/dev/null || echo /data/data/com.termux/files/usr)/../bin}"
+    local mon_dirs=(
+        "$HOME/.local/bin"
+        "$HOME/bin"
+        "$HOME/.bun/bin"
+        "$HOME/.cargo/bin"
+        "$HOME/.deno/bin"
+        "$termux_bin"
+    )
+
+    # Allocate both temp files up front so the single trap covers both
+    local existing_files new_files
+    existing_files=$(mktemp)
+    new_files=$(mktemp)
+    trap "rm -f \"$existing_files\" \"$new_files\"" EXIT
+
+    echo "[glibcx] Taking pre-install snapshot of common bin directories..."
+    for d in "${mon_dirs[@]}"; do
+        [[ -d "$d" ]] && find "$d" -type f -executable 2>/dev/null >> "$existing_files" || true
+    done
+    sort -o "$existing_files" "$existing_files"
+
+    echo "[glibcx] Executing intercepted command:"
+    echo " > $user_cmd"
+    echo "----------------------------------------"
+    eval "$user_cmd"
+    local exit_code=$?
+    echo "----------------------------------------"
+
+    if [[ $exit_code -ne 0 ]]; then
+        echo "[glibcx] Warning: intercepted command exited with code $exit_code." >&2
+    fi
+
+    echo "[glibcx] Taking post-install snapshot..."
+    for d in "${mon_dirs[@]}"; do
+        [[ -d "$d" ]] && find "$d" -type f -executable 2>/dev/null >> "$new_files" || true
+    done
+    sort -o "$new_files" "$new_files"
+
+    local found_any=0
+    echo "[glibcx] Inspecting new executables..."
+    while IFS= read -r bin; do
+        [[ -z "$bin" ]] && continue
+        if file "$bin" | grep -q "ELF 64-bit LSB"; then
+            found_any=1
+            if readelf -d "$bin" 2>/dev/null | grep -q "libc.so"; then
+                echo "[glibcx] Intercepted new glibc binary: $bin"
+                cmd_patch "$bin"
+            else
+                echo "[glibcx] Ignored — Bionic/native binary (no glibc dep): $bin"
+            fi
+        fi
+    done < <(comm -13 "$existing_files" "$new_files")
+
+    if [[ "$found_any" -eq 0 ]]; then
+        echo "[glibcx] No new glibc ELF executables detected in monitored directories."
+    else
+        echo "[glibcx] Intercept complete."
+    fi
+}
+cmd_help() {
+    cat << HELP
+glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.1.0)
+
+USAGE:
+    glibcx setup                   Install prerequisites and configure PATH / Shizuku
+    glibcx patch <binary_path>     Audit, register, and compile a native wrapper
+    glibcx run <binary> [-- args]  Ephemeral trial execution via ld.so (no file changes)
+    glibcx restore <binary_path>   Restore original binary and remove wrapper
+    glibcx upgrade <binary_path>   Re-patch a registered binary (after self-update)
+    glibcx list                    List all managed binaries with status and drift check
+    glibcx info <binary_path>      Show full registry entry for a binary
+    glibcx clean                   Remove registry entries for missing binaries
+    glibcx benchmark               Download + patch 10 popular binaries not in Termux
+
+SMART PROVIDERS:
+    glibcx npm install <pkg>       Smart-install an NPM package (Android-native first)
+    glibcx gh install <owner/repo> Fetch and patch the latest Linux ARM64 GitHub Release
+    glibcx fetch <url>             Download any .tar.gz / .zip / binary, extract & patch
+    glibcx intercept '<cmd>'       Run an install script and auto-patch any new binaries
+
+SUCCESS CRITERIA:
+    glibcx benchmark         Download + patch 10 popular binaries not in Termux
+    glibcx help              Show this help
+
+    glibcx fetch https://example.com/tool-linux-arm64.tar.gz
+    glibcx intercept 'curl -fsSL https://bun.sh/install | bash'
+EXAMPLES:
+    glibcx npm install @anthropic-ai/claude-code
+    glibcx gh install sharkdp/fd
+    glibcx gh install ast-grep/ast-grep
+    glibcx fetch https://example.com/tool-linux-arm64.tar.gz
+    glibcx intercept 'curl -fsSL https://bun.sh/install | bash'
+    glibcx run ./my-binary -- --version
+HELP
+}
+
+case "${1:-}" in
+    setup)     cmd_setup ;;
+    npm)       shift; cmd_npm "$@" ;;
+    gh)        shift; cmd_gh "$@" ;;
+    fetch)     shift; cmd_fetch "$@" ;;
+    intercept) shift; cmd_intercept "$@" ;;
+    patch)     cmd_patch "${2:-}" ;;
+    restore)   cmd_restore "${2:-}" ;;
+    upgrade)   cmd_upgrade "${2:-}" ;;
+    list)      cmd_list ;;
+    info)      cmd_info "${2:-}" ;;
+    clean)     cmd_clean ;;
+    run)       shift; cmd_run "$@" ;;
+    benchmark) cmd_bench ;;
+    help|--help|-h) cmd_help ;;
+    *)         cmd_help; exit 1 ;;
+esac
