@@ -53,7 +53,9 @@ cmd_npm() {
     echo "[glibcx] Downloading $tarball_url ..."
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    trap "rm -rf \"$tmp_dir\"" EXIT
+    # SC2064: use a function so variables expand at cleanup time, not now
+    _npm_cleanup() { rm -rf "$tmp_dir" "${bin_paths_file:-}"; }
+    trap _npm_cleanup EXIT
 
     if ! curl -fSL --progress-bar "$tarball_url" -o "$tmp_dir/package.tgz"; then
         echo "[glibcx] Error: Download failed." >&2
@@ -73,7 +75,6 @@ cmd_npm() {
     # 4. Resolve bin paths safely (no word-splitting)
     local bin_paths_file
     bin_paths_file=$(mktemp)
-    trap "rm -rf \"$tmp_dir\"; rm -f \"$bin_paths_file\"" EXIT
     jq -r '.bin | if type=="string" then . elif type=="object" then to_entries[].value else empty end' \
         "$pkg_json" 2>/dev/null > "$bin_paths_file" || true
 

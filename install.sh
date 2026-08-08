@@ -5,7 +5,7 @@ set -euo pipefail
 REPO="dsecurity49/glibcx"
 INSTALL_DIR="${HOME}/bin"
 BIN_NAME="glibcx"
-RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
+RELEASES_API="https://api.github.com/repos/${REPO}/releases/latest"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 say()  { printf '\033[1;32m[glibcx]\033[0m %s\n' "$*"; }
@@ -24,14 +24,23 @@ say "Installing prerequisites via pkg..."
 pkg install -y glibc-runner patchelf binutils xxd file jq clang curl nodejs 2>/dev/null || \
     say "Some packages may already be installed — continuing."
 
-# ── download glibcx binary ────────────────────────────────────────────────────
+# ── download glibcx binary from latest GitHub Release ────────────────────────
 mkdir -p "$INSTALL_DIR"
 
-say "Downloading glibcx..."
+say "Fetching latest release info..."
+RELEASE_JSON="$(curl -fsSL "${RELEASES_API}")"
+TAG="$(printf '%s' "$RELEASE_JSON" | grep '"tag_name"' | head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+')"
+ASSET_URL="$(printf '%s' "$RELEASE_JSON" | grep '"browser_download_url"' | grep '"glibcx"' | head -1 | grep -oE 'https://[^""]+')"
+
+if [[ -z "$ASSET_URL" ]]; then
+    die "Could not find glibcx binary asset in latest release. Check https://github.com/${REPO}/releases"
+fi
+
+say "Installing ${TAG}..."
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
-curl -fsSL --progress-bar "${RAW_BASE}/glibcx" -o "$TMP"
+curl -fsSL --progress-bar "$ASSET_URL" -o "$TMP"
 
 # Verify it's a shell script (built monolithic bash binary)
 if ! head -1 "$TMP" | grep -q "bash\|sh"; then

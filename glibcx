@@ -700,7 +700,7 @@ cmd_bench() {
         local ver
         case "$bin" in
             sg)            ver="(alias for ast-grep — deprecated)" ;;
-            hurl|hurlfmt)  ver="$(\"$wrapper\" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 'needs libxml2 (glibc) — see glibcx info')" ;;
+            hurl|hurlfmt)  ver="$("$wrapper" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 'needs libxml2 (glibc) — see glibcx info')" ;;
             cargo-llvm-cov) ver="$("$wrapper" llvm-cov --version 2>&1 | head -1 | cut -c1-55 || true)" ;;
             cargo-binstall) ver="$("$wrapper" -V 2>&1 | head -1 | cut -c1-55 || true)" ;;
             detect-targets|detect-wasi) ver="$("$wrapper" 2>&1 | head -1 | cut -c1-55 || true)" ;;
@@ -770,7 +770,7 @@ cmd_bench() {
         local_n=$(find "$ppath" -type f | wc -l)
         proot_n=$(find "${proot_tmp}/${pname}" -type f 2>/dev/null | wc -l)
         if [[ "$local_n" != "$proot_n" ]]; then
-            rm -rf "${proot_tmp}/${pname}"
+            rm -rf "${proot_tmp:?}/${pname}"
             cp -r "$ppath" "${proot_tmp}/${pname}"
         fi
     done
@@ -915,7 +915,8 @@ cmd_fetch() {
     local safe_name="${custom_name//\//_}"
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    trap "rm -rf \"$tmp_dir\"" EXIT
+    _fetch_cleanup() { rm -rf "$tmp_dir"; }
+    trap _fetch_cleanup EXIT
 
     echo "[glibcx] Downloading $url ..."
     if ! curl -fSL --progress-bar "$url" -o "$tmp_dir/$filename"; then
@@ -1033,7 +1034,9 @@ cmd_npm() {
     echo "[glibcx] Downloading $tarball_url ..."
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    trap "rm -rf \"$tmp_dir\"" EXIT
+    # SC2064: use a function so variables expand at cleanup time, not now
+    _npm_cleanup() { rm -rf "$tmp_dir" "${bin_paths_file:-}"; }
+    trap _npm_cleanup EXIT
 
     if ! curl -fSL --progress-bar "$tarball_url" -o "$tmp_dir/package.tgz"; then
         echo "[glibcx] Error: Download failed." >&2
@@ -1053,7 +1056,6 @@ cmd_npm() {
     # 4. Resolve bin paths safely (no word-splitting)
     local bin_paths_file
     bin_paths_file=$(mktemp)
-    trap "rm -rf \"$tmp_dir\"; rm -f \"$bin_paths_file\"" EXIT
     jq -r '.bin | if type=="string" then . elif type=="object" then to_entries[].value else empty end' \
         "$pkg_json" 2>/dev/null > "$bin_paths_file" || true
 
@@ -1187,7 +1189,8 @@ cmd_intercept() {
     local existing_files new_files
     existing_files=$(mktemp)
     new_files=$(mktemp)
-    trap "rm -f \"$existing_files\" \"$new_files\"" EXIT
+    _intercept_cleanup() { rm -f "$existing_files" "$new_files"; }
+    trap _intercept_cleanup EXIT
 
     echo "[glibcx] Taking pre-install snapshot of common bin directories..."
     for d in "${mon_dirs[@]}"; do
@@ -1235,7 +1238,7 @@ cmd_intercept() {
 }
 cmd_help() {
     cat << HELP
-glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.1.0)
+glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.1.1)
 
 USAGE:
     glibcx setup                   Install prerequisites and configure PATH / Shizuku

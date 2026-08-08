@@ -88,7 +88,7 @@ cmd_bench() {
         local ver
         case "$bin" in
             sg)            ver="(alias for ast-grep — deprecated)" ;;
-            hurl|hurlfmt)  ver="$(\"$wrapper\" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 'needs libxml2 (glibc) — see glibcx info')" ;;
+            hurl|hurlfmt)  ver="$("$wrapper" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 'needs libxml2 (glibc) — see glibcx info')" ;;
             cargo-llvm-cov) ver="$("$wrapper" llvm-cov --version 2>&1 | head -1 | cut -c1-55 || true)" ;;
             cargo-binstall) ver="$("$wrapper" -V 2>&1 | head -1 | cut -c1-55 || true)" ;;
             detect-targets|detect-wasi) ver="$("$wrapper" 2>&1 | head -1 | cut -c1-55 || true)" ;;
@@ -158,7 +158,7 @@ cmd_bench() {
         local_n=$(find "$ppath" -type f | wc -l)
         proot_n=$(find "${proot_tmp}/${pname}" -type f 2>/dev/null | wc -l)
         if [[ "$local_n" != "$proot_n" ]]; then
-            rm -rf "${proot_tmp}/${pname}"
+            rm -rf "${proot_tmp:?}/${pname}"
             cp -r "$ppath" "${proot_tmp}/${pname}"
         fi
     done

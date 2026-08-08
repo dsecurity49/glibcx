@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "release/**"]
+  pull_request:
+    branches: ["main", "release/**"]
+
+jobs:
+  # ── Job 1: Shell lint + syntax ──────────────────────────────────────────────
+  lint:
+    name: Shell lint & syntax
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: bash -n syntax check (all .sh files)
+        run: |
+          find . -name "*.sh" -not -path "./.git/*" | while read -r f; do
+            echo "Checking: $f"
+            bash -n "$f" || exit 1
+          done
+
+      - name: shellcheck
+        run: |
+          find . -name "*.sh" -not -path "./.git/*" | xargs shellcheck \
+            --severity=warning \
+            --exclude=SC2034,SC2148,SC1091
+
+  # ── Job 2: C wrapper compile check ─────────────────────────────────────────
+  c-wrapper-syntax:
+    name: C wrapper compile check
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get install -y clang
+
+      - name: Extract and syntax-check C wrapper template
+        run: |
+          awk '/^#include <stdio\.h>/{found=1} found && /^C_CODE$/{exit} found{print}' src/patch.sh \
+            | sed \
+                -e 's|\${target_bin}|/usr/bin/test-binary|g' \
+                -e 's|\${patched_fp}|12345_67890|g' \
+                -e 's|\${GLIBC_INTERPRETER}|/lib/ld-linux-aarch64.so.1|g' \
+                -e 's|\${GLIBC_LIB_DIR}|/lib/aarch64-linux-gnu|g' \
+            > /tmp/wrapper_check.c
+          echo "Extracted $(wc -l < /tmp/wrapper_check.c) lines of C"
+          clang -fsyntax-only \
+            -Wall -Wextra -Wno-unused-parameter \
+            /tmp/wrapper_check.c
+
+  # ── Job 3: End-to-end integration test on real AArch64 glibc ───────────────
+  integration:
+    name: End-to-end integration (AArch64 glibc)
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang file jq curl
+
+      - name: Run integration test
+        run: bash ci/integration_test.sh
+
+  # ── Job 4: Publish GitHub Release (on version tag only) ────────────────────
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-26.04-arm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, c-wrapper-syntax, integration]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload glibcx binary as release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          body: |
+            ## Install
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/dsecurity49/glibcx/main/install.sh | bash
+            ```
+
+            ## What's changed
+            See [commits](https://github.com/dsecurity49/glibcx/commits/${{ steps.tag.outputs.tag }}) for details.
+          files: glibcx
+          fail_on_unmatched_files: true
