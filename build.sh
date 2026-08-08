@@ -7,8 +7,9 @@ echo "# glibcx - Universal Native-Speed glibc Binary Runner & Patcher" >> "$OUT"
 echo "set -euo pipefail" >> "$OUT"
 echo "" >> "$OUT"
 
-# Concatenate modules
-cat src/common.sh \
+# Concatenate modules (ensure newline between modules to avoid token merging)
+modules=(
+    src/common.sh \
     src/setup.sh \
     src/patch.sh \
     src/bench.sh \
@@ -18,7 +19,15 @@ cat src/common.sh \
     src/providers/intercept.sh \
     src/providers/vendor.sh \
     src/providers/selfupdate.sh \
-    src/main.sh >> "$OUT"
+    src/main.sh
+)
+for index in "${!modules[@]}"; do
+    mod="${modules[$index]}"
+    cat "$mod" >> "$OUT"
+    if (( index < ${#modules[@]} - 1 )); then
+        printf '\n' >> "$OUT"
+    fi
+done
 
 chmod +x "$OUT"
 echo "Build complete: $OUT"

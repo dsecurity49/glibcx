@@ -8,8 +8,12 @@ cmd_bench() {
         local lw="$1" label="$2"; shift 2
         local t0 t1
         t0=$(date +%s%3N)
-        "$@" >/dev/null 2>&1
-        local rc=$?
+        local rc
+        if "$@" >/dev/null 2>&1; then
+            rc=0
+        else
+            rc=$?
+        fi
         t1=$(date +%s%3N)
         awk -v ms="$((t1 - t0))" 'BEGIN{printf "%.3f", ms/1000}'
         return $rc
@@ -21,7 +25,10 @@ cmd_bench() {
         local total=0
         for _ in 1 2 3; do
             local t
-            t=$(_time_cmd 0 "" "${cmd[@]}")
+            if ! t=$(_time_cmd 0 "" "${cmd[@]}"); then
+                printf 'N/A'
+                return 0
+            fi
             total=$(awk -v a="$total" -v b="$t" 'BEGIN{printf "%.3f", a+b}')
         done
         awk -v t="$total" 'BEGIN{printf "%.3fs", t/3}'
@@ -30,7 +37,7 @@ cmd_bench() {
     # ── Phase 1: Install ─────────────────────────────────────────────────────
     echo ""
     echo "[glibcx] ══════════════════════════════════════════════════════════"
-    echo "[glibcx]  PHASE 1 — Install 10 Linux ARM64 tools absent from Termux"
+    echo "[glibcx]  PHASE 1 — Install 11 Linux ARM64 tools absent from Termux"
     echo "[glibcx] ══════════════════════════════════════════════════════════"
     echo ""
 
@@ -56,7 +63,7 @@ cmd_bench() {
         local status="installed"
 
         # Already in registry?
-        if find ~/.glibcx/opt -name "$bin_name" -type f 2>/dev/null | grep -q .; then
+        if find "${CLI_STORAGE}/opt" -name "$bin_name" -type f 2>/dev/null | grep -q .; then
             printf "  %-38s  %-12s  %s\n" "$repo" "cached" "already installed"
             continue
         fi
@@ -99,7 +106,7 @@ cmd_bench() {
 
     echo ""
     echo "[glibcx] ── Installed wrappers ──────────────────────────────────"
-    for bin in ast-grep sg delta jnv hurl hurlfmt xplr btm cargo-llvm-cov rg fd cargo-binstall tv; do
+    for bin in ast-grep delta jnv hurl hurlfmt xplr btm cargo-llvm-cov rg fd cargo-binstall tv; do
         _ver "$bin"
     done
 
@@ -166,7 +173,7 @@ cmd_bench() {
     # Ensure rg + fdfind are in proot debian
     local has_proot_rg proot_fd_cmd
     has_proot_rg=$(proot-distro login debian --shared-tmp -- bash -c \
-        "command -v rg 2>/dev/null && echo yes || echo no" 2>/dev/null || echo no)
+        "command -v rg >/dev/null 2>&1 && echo yes || echo no" 2>/dev/null || echo no)
     local has_proot_fd
     has_proot_fd=$(proot-distro login debian --shared-tmp -- bash -c \
         "command -v fdfind 2>/dev/null && echo yes; command -v fd 2>/dev/null && echo yes; echo no" \
@@ -206,17 +213,24 @@ cmd_bench() {
         "DATASET / TOOL" "glibcx" "Termux native" "proot-distro" "COMPARISON"
     printf "  %s\n" "$(printf '─%.0s' {1..100})"
 
+    local sys_rg sys_fd
+    # Disable pipefail just for the fallback resolution block so `grep -v` doesn't exit the shell if native binary is missing
+    set +o pipefail
+    sys_rg=$(which -a rg 2>/dev/null | grep -v "\.glibcx/bin" | head -n1 || echo "rg")
+    sys_fd=$(which -a fd 2>/dev/null | grep -v "\.glibcx/bin" | head -n1 || echo "fd")
+    set -o pipefail
+
     # ── dataset 1: benchdata (1000 files, 4MB) ───────────────────────────────
     if [[ -x "$rg_bin" ]] && [[ -d "$ds1" ]]; then
         _row "benchdata    rg -l" \
             "$rg_bin -l 'MATCHME' $ds1/ 2>/dev/null" \
-            "rg -l 'MATCHME' $ds1/ 2>/dev/null" \
+            "$sys_rg -l 'MATCHME' $ds1/ 2>/dev/null" \
             "proot-distro login debian --shared-tmp -- bash -c \"rg -l 'MATCHME' /tmp/glibcx_bench/ 2>/dev/null\""
     fi
     if [[ -x "$fd_bin" ]] && [[ -d "$ds1" ]]; then
         _row "benchdata    fd -t f" \
             "$fd_bin -t f . $ds1/ 2>/dev/null" \
-            "fd -t f . $ds1/ 2>/dev/null" \
+            "$sys_fd -t f . $ds1/ 2>/dev/null" \
             "proot-distro login debian --shared-tmp -- bash -c \"fdfind -t f . /tmp/glibcx_bench/ 2>/dev/null\""
     fi
 
@@ -224,13 +238,13 @@ cmd_bench() {
     if [[ -x "$rg_bin" ]] && [[ -d "$ds2" ]]; then
         _row "benchdata_large  rg -l" \
             "$rg_bin -l 'MATCHME' $ds2/ 2>/dev/null" \
-            "rg -l 'MATCHME' $ds2/ 2>/dev/null" \
+            "$sys_rg -l 'MATCHME' $ds2/ 2>/dev/null" \
             "proot-distro login debian --shared-tmp -- bash -c \"rg -l 'MATCHME' /tmp/glibcx_large/ 2>/dev/null\""
     fi
     if [[ -x "$fd_bin" ]] && [[ -d "$ds2" ]]; then
         _row "benchdata_large  fd -t f" \
             "$fd_bin -t f . $ds2/ 2>/dev/null" \
-            "fd -t f . $ds2/ 2>/dev/null" \
+            "$sys_fd -t f . $ds2/ 2>/dev/null" \
             "proot-distro login debian --shared-tmp -- bash -c \"fdfind -t f . /tmp/glibcx_large/ 2>/dev/null\""
     fi
 
@@ -238,13 +252,13 @@ cmd_bench() {
     if [[ -x "$rg_bin" ]] && [[ -d "$ds3" ]]; then
         _row "benchdata_real   rg -l" \
             "$rg_bin -l 'MATCHME' $ds3/ 2>/dev/null" \
-            "rg -l 'MATCHME' $ds3/ 2>/dev/null" \
+            "$sys_rg -l 'MATCHME' $ds3/ 2>/dev/null" \
             "proot-distro login debian --shared-tmp -- bash -c \"rg -l 'MATCHME' /tmp/glibcx_real/ 2>/dev/null\""
     fi
     if [[ -x "$fd_bin" ]] && [[ -d "$ds3" ]]; then
         _row "benchdata_real   fd -t f" \
             "$fd_bin -t f . $ds3/ 2>/dev/null" \
-            "fd -t f . $ds3/ 2>/dev/null" \
+            "$sys_fd -t f . $ds3/ 2>/dev/null" \
             "proot-distro login debian --shared-tmp -- bash -c \"fdfind -t f . /tmp/glibcx_real/ 2>/dev/null\""
     fi
 

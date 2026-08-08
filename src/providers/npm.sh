@@ -1,3 +1,11 @@
+_GLIBCX_NPM_TMP_DIR=""
+_GLIBCX_NPM_BIN_PATHS_FILE=""
+
+_cleanup_npm() {
+    [[ -n "${_GLIBCX_NPM_TMP_DIR:-}" ]] && rm -rf "${_GLIBCX_NPM_TMP_DIR:?}"
+    [[ -n "${_GLIBCX_NPM_BIN_PATHS_FILE:-}" ]] && rm -f "${_GLIBCX_NPM_BIN_PATHS_FILE:?}"
+}
+
 cmd_npm() {
     local action="${1:-}"
     local raw_pkg="${2:-}"
@@ -40,12 +48,21 @@ cmd_npm() {
         target_pkg="$arm_pkg"
     fi
 
-    # 2. Get tarball URL
-    local tarball_url
-    tarball_url=$(npm view "$target_pkg" dist.tarball 2>/dev/null || true)
+    # 2. Get the tarball URL and registry-provided content integrity together.
+    # Fetching both fields in one query avoids mixing a URL from one version with
+    # an integrity value from a later registry update.
+    local dist_metadata tarball_url tarball_integrity
+    dist_metadata=$(npm view "$target_pkg" dist --json 2>/dev/null || true)
+    tarball_url=$(echo "$dist_metadata" | jq -r '.tarball // empty' 2>/dev/null || true)
+    tarball_integrity=$(echo "$dist_metadata" | jq -r '.integrity // empty' 2>/dev/null || true)
 
     if [[ -z "$tarball_url" ]]; then
         echo "[glibcx] Error: Could not resolve tarball URL for '$target_pkg'." >&2
+        exit 1
+    fi
+    if [[ "$tarball_integrity" != sha512-* ]]; then
+        echo "[glibcx] Error: '$target_pkg' does not publish a SHA-512 dist.integrity value." >&2
+        echo "[glibcx] Refusing an unverifiable direct tarball download." >&2
         exit 1
     fi
 
@@ -53,13 +70,27 @@ cmd_npm() {
     echo "[glibcx] Downloading $tarball_url ..."
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf \"$tmp_dir\"" EXIT
+    _GLIBCX_NPM_TMP_DIR="$tmp_dir"
+    trap _cleanup_npm EXIT
 
     if ! curl -fSL --progress-bar "$tarball_url" -o "$tmp_dir/package.tgz"; then
         echo "[glibcx] Error: Download failed." >&2
         exit 1
     fi
+    local actual_integrity
+    if ! actual_integrity=$(node -e '
+const crypto = require("crypto");
+const fs = require("fs");
+console.log("sha512-" + crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"));
+' "$tmp_dir/package.tgz"); then
+        echo "[glibcx] Error: Could not calculate tarball integrity." >&2
+        exit 1
+    fi
+    if [[ "$actual_integrity" != "$tarball_integrity" ]]; then
+        echo "[glibcx] Error: NPM tarball integrity check failed for '$target_pkg'." >&2
+        exit 1
+    fi
+    echo "[glibcx] Tarball integrity verified."
 
     echo "[glibcx] Extracting package..."
     mkdir -p "$tmp_dir/ext"
@@ -74,8 +105,7 @@ cmd_npm() {
     # 4. Resolve bin paths safely (no word-splitting)
     local bin_paths_file
     bin_paths_file=$(mktemp)
-    # shellcheck disable=SC2064
-    trap "rm -rf \"$tmp_dir\"; rm -f \"$bin_paths_file\"" EXIT
+    _GLIBCX_NPM_BIN_PATHS_FILE="$bin_paths_file"
     jq -r '.bin | if type=="string" then . elif type=="object" then to_entries[].value else empty end' \
         "$pkg_json" 2>/dev/null > "$bin_paths_file" || true
 
@@ -93,22 +123,34 @@ cmd_npm() {
     fi
 
     # 5. Install package files to permanent location
-    local safe_pkg_name="${target_pkg//\//_}"
+    local safe_pkg_name="${target_pkg//[^[:alnum:]@._-]/_}"
+    if [[ -z "$safe_pkg_name" || "$safe_pkg_name" == "." || "$safe_pkg_name" == ".." ]]; then
+        echo "[glibcx] Error: invalid package install name '$target_pkg'." >&2
+        exit 1
+    fi
     local install_dir="${CLI_STORAGE}/opt/${safe_pkg_name}"
     echo "[glibcx] Installing to $install_dir ..."
-    rm -rf "$install_dir"
+    rm -rf "${install_dir:?}"
     mkdir -p "$install_dir"
     cp -r "$tmp_dir/ext/package/"* "$install_dir/"
 
     # 6. Patch each binary (safe loop — no word-splitting)
     while IFS= read -r b_path; do
         [[ -z "$b_path" ]] && continue
+        case "$b_path" in
+            /*|..|../*|*/..|*/../*)
+                echo "[glibcx] Warning: ignoring unsafe package bin path '$b_path'." >&2
+                continue
+                ;;
+        esac
         local full_bin_path="$install_dir/$b_path"
         if [[ -f "$full_bin_path" ]]; then
             chmod +x "$full_bin_path"
-            if file "$full_bin_path" | grep -q "ELF 64-bit"; then
+            if _is_aarch64_elf "$full_bin_path"; then
                 echo "[glibcx] Patching: $b_path"
                 cmd_patch "$full_bin_path"
+            elif file "$full_bin_path" | grep -q "ELF 64-bit"; then
+                echo "[glibcx] Skipping non-AArch64 ELF: $b_path"
             else
                 echo "[glibcx] Skipping non-ELF (script/wrapper): $b_path"
             fi

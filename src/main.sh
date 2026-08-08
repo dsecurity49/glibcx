@@ -6,13 +6,13 @@ USAGE:
     glibcx setup                   Install prerequisites and configure PATH / Shizuku
     glibcx patch <binary_path>     Audit, register, and compile a native wrapper
     glibcx run <binary> [-- args]  Ephemeral trial execution via ld.so (no file changes)
-    glibcx restore <binary_path>   Restore original binary and remove wrapper (alias: unpatch)
+    glibcx restore <binary_path>   Remove wrapper and registry entry (alias: unpatch; original binary untouched)
     glibcx vendor <binary> <libs>  Copy external .so files into the wrapper's library path
     glibcx upgrade <binary_path>   Re-patch a registered binary (after self-update)
     glibcx list                    List all managed binaries with status and drift check
     glibcx info <binary_path>      Show full registry entry for a binary
     glibcx clean                   Remove registry entries for missing binaries
-    glibcx benchmark               Download + patch 10 popular binaries not in Termux
+    glibcx benchmark               Download + patch 11 popular binaries not in Termux
     glibcx self-update [--force]   Update glibcx to the latest release
 
 SMART PROVIDERS:
@@ -22,7 +22,7 @@ SMART PROVIDERS:
     glibcx intercept '<cmd>'       Run an install script and auto-patch any new binaries
 
 SUCCESS CRITERIA:
-    glibcx benchmark         Download + patch 10 popular binaries not in Termux
+    glibcx benchmark         Download + patch 11 popular binaries not in Termux
     glibcx help              Show this help
 
     glibcx fetch https://example.com/tool-linux-arm64.tar.gz
@@ -52,7 +52,7 @@ case "${1:-}" in
     clean)       cmd_clean ;;
     run)         shift; cmd_run "$@" ;;
     benchmark)   cmd_bench ;;
-    self-update) cmd_selfupdate ;;
+    self-update) shift; cmd_selfupdate "$@" ;;
     help|--help|-h) cmd_help ;;
     *)           cmd_help; exit 1 ;;
 esac

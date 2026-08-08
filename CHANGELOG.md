@@ -4,13 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.2.0] - 2026-08-08
 ### Added
-- **Dependency Vendoring (`glibcx vendor`):** New command to easily vendor missing non-glibc `.so` libraries for a specific binary. The C wrapper now dynamically includes `~/.glibcx/lib/<binary>` in its `LD_LIBRARY_PATH`.
-- **Self-Update (`glibcx self-update`):** New command to seamlessly download and apply the latest `glibcx` release directly from GitHub over the current executable.
-- **`unpatch` Alias:** Added `glibcx unpatch` as an intuitive alias for `glibcx restore`.
-- **Release Checksums:** SHA256 checksums are now generated and uploaded as release assets for the compiled `glibcx` binary.
+- **`glibcx vendor`:** copy external `.so` libs into `~/.glibcx/lib/<binary>`, which the C wrapper adds to `LD_LIBRARY_PATH`. Resolves wrapper paths, and refuses non-AArch64 / non-shared-object files.
+- **`glibcx self-update [--force]`:** replaces the running executable with the latest release; `unpatch` added as a `restore` alias.
+- **Release checksums:** CI uploads `glibcx.sha256`; both `install.sh` and `self-update` verify it before installing, and refuse unverified releases unless `--force` is passed (the flag is now actually parsed).
+- **NPM tarball verification:** direct NPM downloads now require and verify the registry's SHA-512 `dist.integrity` value before extraction.
 
-### Changed
-- **README Updates:** Cleaned up documentation, moved `/proc/self/exe` notes purely into the Limitations section, streamlined the Features list, and removed redundant navigation links.
+### Fixed
+- **Interception:** Bionic binaries (bare `libc.so`) are no longer mistaken for glibc builds; snapshot lines include mtime, so replaced/updated executables are detected too.
+- **Provider safety:** mixed-architecture downloads are skipped cleanly, and NPM package `bin` paths cannot escape the package installation directory.
+- **Name collisions:** patching two binaries with the same basename (shared `~/.glibcx/bin/<name>` and `~/.glibcx/lib/<name>`) is now rejected with a clear error.
+- **Patch pipeline:** non-AArch64 ELF files are rejected up front, and registry entries are only written after the wrapper compiles successfully.
+- **Target validation:** static executables and Bionic-linked Android binaries are refused instead of generating wrappers that cannot run.
+- **Wrapper portability:** loader mappings use the runtime page size and ELF alignment, removing the former 4 KB-page assumption on ARM64 Android devices.
+- **Wrapper safety:** paths are emitted as C byte arrays, so quotes and backslashes cannot corrupt generated C source; newline-containing paths are rejected explicitly.
+- **Drift detection:** records device, inode, size, mtime, and ctime to catch in-place updates that preserve mtime.
+- **Setup safety:** no longer alters the package-managed `glibc-runner` `libc.so` linker script.
+- **Release integrity:** CI rebuilds `glibcx` from `src/` before publishing and rejects committed executables that are out of sync with source.
+- **Audit accuracy:** the NEEDED-library classifier is anchored to real glibc names (no more `libcrypto`/`libmagic` false positives).
+- **Restore semantics:** `glibcx restore` no longer copies a backup over the binary (it was never modified) — it just removes the wrapper and registry entry, so a self-updated binary can never be downgraded.
+- **Benchmark:** 11-tool count now correct in banner/help; "Termux native" timings no longer measure the wrappers themselves; fixed the `proot-distro` presence check.
+- **Build:** `build.sh` enforces a newline between modules to prevent token-merging syntax errors.
 
 ## [v0.1.2] - 2026-08-08
 ### Fixed

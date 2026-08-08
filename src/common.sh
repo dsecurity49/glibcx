@@ -15,9 +15,17 @@ init_env() {
     fi
 }
 
-# Drift fingerprint: mtime + size — fast, no re-hash on every invocation
+# Drift fingerprint: file identity + size + mtime + ctime.  This catches
+# in-place rewrites even when an updater preserves the original mtime.
 _fingerprint() {
-    stat -c '%Y_%s' "$1" 2>/dev/null || echo "missing"
+    stat -c '%d_%i_%s_%Y_%Z' "$1" 2>/dev/null || echo "missing"
+}
+
+# Return success only for an AArch64 ELF. Providers use this before offering a
+# downloaded executable to cmd_patch, so a mixed-architecture archive does not
+# abort an otherwise usable install.
+_is_aarch64_elf() {
+    file "$1" 2>/dev/null | grep -qE 'ELF 64-bit LSB.*(aarch64|ARM aarch64)'
 }
 
 # json_update_entry <binary_path> <orig_hash> <patched_fp> <glibc_required>

@@ -18,6 +18,12 @@ done
 say()  { printf '\033[1;32m[glibcx]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[glibcx] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found. Run: pkg install $1"; }
+TMP=""
+TMP_SUM=""
+cleanup() {
+    [[ -n "${TMP:-}" ]] && rm -f "${TMP:?}"
+    [[ -n "${TMP_SUM:-}" ]] && rm -f "${TMP_SUM:?}"
+}
 
 # ── sanity checks ─────────────────────────────────────────────────────────────
 [[ "$(uname -o)" == "Android" ]] || die "glibcx is designed for Termux on Android."
@@ -28,7 +34,7 @@ need bash
 
 # ── install prerequisites ─────────────────────────────────────────────────────
 say "Installing prerequisites via pkg..."
-pkg install -y glibc-runner patchelf binutils xxd file jq clang curl nodejs 2>/dev/null || \
+pkg install -y glibc-runner binutils file jq clang curl nodejs 2>/dev/null || \
     say "Some packages may already be installed — continuing."
 
 need jq
@@ -52,7 +58,7 @@ fi
 say "Installing ${TAG}..."
 TMP="$(mktemp)"
 TMP_SUM="$(mktemp)"
-trap 'rm -f "$TMP" "$TMP_SUM"' EXIT
+trap cleanup EXIT
 
 curl -fsSL --progress-bar "$ASSET_URL" -o "$TMP"
 

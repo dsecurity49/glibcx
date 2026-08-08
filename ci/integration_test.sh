@@ -7,10 +7,21 @@ set -euo pipefail
 pass() { printf '\033[1;32m  PASS\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m  FAIL\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[1;34m  ----\033[0m %s\n' "$*"; }
+cleanup() { rm -rf "${TEST_TMP_DIR:?}"; }
+c_bytes() {
+  printf '%s' "$1" | LC_ALL=C od -An -v -t u1 | awk '
+    { for (i = 1; i <= NF; i++) printf "0x%02x, ", $i }
+    END { print "0x00" }
+  '
+}
 
 # ── 1. Locate system glibc loader ────────────────────────────────────────────
 info "Locating glibc dynamic linker..."
-LDSO=$(find /lib /usr/lib -name "ld-linux-aarch64.so.1" 2>/dev/null | head -1)
+loader_dirs=(/lib /usr/lib)
+if [[ -n "${PREFIX:-}" && -d "${PREFIX}/glibc/lib" ]]; then
+  loader_dirs=("${PREFIX}/glibc/lib" "${loader_dirs[@]}")
+fi
+LDSO=$(find "${loader_dirs[@]}" -name "ld-linux-aarch64.so.1" 2>/dev/null | head -1 || true)
 [[ -n "$LDSO" ]] || fail "ld-linux-aarch64.so.1 not found on this system"
 LIBDIR=$(dirname "$LDSO")
 info "ld.so   : $LDSO"
@@ -31,54 +42,57 @@ URL=$(echo "$RELEASE" | jq -r '
 [[ -n "$URL" ]] || fail "Could not find fd glibc AArch64 asset"
 info "Downloading: $URL"
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+TEST_TMP_DIR=$(mktemp -d)
+trap cleanup EXIT
 
-curl -fsSL "$URL" -o "$TMPDIR/fd.tar.gz"
-tar -xzf "$TMPDIR/fd.tar.gz" -C "$TMPDIR"
-FD_BIN=$(find "$TMPDIR" -name "fd" -type f -executable | head -1)
+curl -fsSL "$URL" -o "$TEST_TMP_DIR/fd.tar.gz"
+tar -xzf "$TEST_TMP_DIR/fd.tar.gz" -C "$TEST_TMP_DIR"
+FD_BIN=$(find "$TEST_TMP_DIR" -name "fd" -type f -executable | head -1 || true)
 [[ -n "$FD_BIN" ]] || fail "fd binary not found in tarball"
-cp "$FD_BIN" /tmp/fd-test-bin
-chmod +x /tmp/fd-test-bin
-info "fd binary: $(file /tmp/fd-test-bin)"
+TARGET="$TEST_TMP_DIR/fd-test\\name"
+cp "$FD_BIN" "$TARGET"
+chmod +x "$TARGET"
+info "fd binary: $(file "$TARGET")"
 
 # ── 3. Verify it's AArch64 glibc ELF ─────────────────────────────────────────
-file /tmp/fd-test-bin | grep -q "ELF 64-bit" || fail "Not a 64-bit ELF"
-file /tmp/fd-test-bin | grep -qiE "aarch64|arm64"  || fail "Not AArch64"
+file "$TARGET" | grep -q "ELF 64-bit" || fail "Not a 64-bit ELF"
+file "$TARGET" | grep -qiE "aarch64|arm64"  || fail "Not AArch64"
 pass "Binary is AArch64 ELF"
 
 # ── 4. Extract and compile C wrapper ─────────────────────────────────────────
 info "Extracting C wrapper template from src/patch.sh..."
-TARGET=/tmp/fd-test-bin
-FP=$(stat -c '%Y_%s' "$TARGET")
+FP=$(stat -c '%d_%i_%s_%Y_%Z' "$TARGET")
+TARGET_BYTES=$(c_bytes "$TARGET")
+LDSO_BYTES=$(c_bytes "$LDSO")
+LIBRARY_PATH_BYTES=$(c_bytes "$LIBDIR")
 
 # The C code lives between the first '#include <stdio.h>' line and 'C_CODE' heredoc terminator
 awk '/^#include <stdio\.h>/{found=1} found && /^C_CODE$/{exit} found{print}' src/patch.sh \
   | sed \
-      -e "s|\${target_bin}|${TARGET}|g" \
+      -e "s|\${target_c_bytes}|${TARGET_BYTES}|g" \
       -e "s|\${patched_fp}|${FP}|g" \
-      -e "s|\${GLIBC_INTERPRETER}|${LDSO}|g" \
-      -e "s|\${GLIBC_LIB_DIR}|${LIBDIR}|g" \
-  > /tmp/fd_wrapper.c
+      -e "s|\${ldso_c_bytes}|${LDSO_BYTES}|g" \
+      -e "s|\${library_path_c_bytes}|${LIBRARY_PATH_BYTES}|g" \
+  > "$TEST_TMP_DIR/fd_wrapper.c"
 
-LINES=$(wc -l < /tmp/fd_wrapper.c)
+LINES=$(wc -l < "$TEST_TMP_DIR/fd_wrapper.c")
 info "Extracted ${LINES} lines of C"
 [[ "$LINES" -gt 50 ]] || fail "C extraction produced too few lines — sed anchor may be broken"
 
 info "Compiling wrapper with clang..."
-clang -O2 /tmp/fd_wrapper.c -o /tmp/fd_wrapper
-pass "Wrapper compiled: $(file /tmp/fd_wrapper)"
+clang -O2 "$TEST_TMP_DIR/fd_wrapper.c" -o "$TEST_TMP_DIR/fd_wrapper"
+pass "Wrapper compiled: $(file "$TEST_TMP_DIR/fd_wrapper")"
 
 # ── 5. Run: version check ─────────────────────────────────────────────────────
 info "Running fd through wrapper: --version"
-OUT=$(/tmp/fd_wrapper --version 2>&1 || true)
+OUT=$("$TEST_TMP_DIR/fd_wrapper" --version 2>&1 || true)
 info "Output: $OUT"
 echo "$OUT" | grep -qE "[0-9]+\.[0-9]+\.[0-9]+" || fail "No version string in output: '$OUT'"
 pass "fd --version: $OUT"
 
 # ── 6. Run: real file search ──────────────────────────────────────────────────
 info "Running fd through wrapper: find .sh files"
-COUNT=$(/tmp/fd_wrapper -e sh . 2>/dev/null | wc -l)
+COUNT=$("$TEST_TMP_DIR/fd_wrapper" -e sh . 2>/dev/null | wc -l)
 info "Found $COUNT .sh files"
 [[ "$COUNT" -ge 5 ]] || fail "fd found too few .sh files ($COUNT) — expected ≥5"
 pass "fd -e sh found $COUNT files"
@@ -86,8 +100,8 @@ pass "fd -e sh found $COUNT files"
 # ── 7. Drift detection ────────────────────────────────────────────────────────
 info "Testing drift detection (touch binary to change mtime)..."
 sleep 1
-touch /tmp/fd-test-bin
-DRIFT_OUT=$(/tmp/fd_wrapper --version 2>&1 || true)
+touch "$TARGET"
+DRIFT_OUT=$("$TEST_TMP_DIR/fd_wrapper" --version 2>&1 || true)
 info "Drift output: $DRIFT_OUT"
 echo "$DRIFT_OUT" | grep -q "changed since patching" || \
   fail "Drift detection did not trigger after mtime change. Got: '$DRIFT_OUT'"

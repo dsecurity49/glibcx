@@ -1,3 +1,9 @@
+_GLIBCX_FETCH_TMP_DIR=""
+
+_cleanup_fetch() {
+    [[ -n "${_GLIBCX_FETCH_TMP_DIR:-}" ]] && rm -rf "${_GLIBCX_FETCH_TMP_DIR:?}"
+}
+
 cmd_fetch() {
     local url="${1:-}"
     local custom_name="${2:-}"
@@ -10,6 +16,10 @@ cmd_fetch() {
 
     local filename
     filename=$(basename "${url%%\?*}")
+    if [[ -z "$filename" || "$filename" == "." || "$filename" == ".." ]]; then
+        echo "[glibcx] Error: URL does not contain a safe filename: $url" >&2
+        exit 1
+    fi
 
     # Derive a clean name by stripping all known archive extensions
     if [[ -z "$custom_name" ]]; then
@@ -23,11 +33,15 @@ cmd_fetch() {
         custom_name="${custom_name%.gz}"
     fi
 
-    local safe_name="${custom_name//\//_}"
+    local safe_name="${custom_name//[^[:alnum:]._-]/_}"
+    if [[ -z "$safe_name" || "$safe_name" == "." || "$safe_name" == ".." ]]; then
+        echo "[glibcx] Error: invalid install name '$custom_name'." >&2
+        exit 1
+    fi
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf \"$tmp_dir\"" EXIT
+    _GLIBCX_FETCH_TMP_DIR="$tmp_dir"
+    trap _cleanup_fetch EXIT
 
     echo "[glibcx] Downloading $url ..."
     if ! curl -fSL --progress-bar "$url" -o "$tmp_dir/$filename"; then
@@ -63,7 +77,7 @@ cmd_fetch() {
     fi
 
     local install_dir="${CLI_STORAGE}/opt/${safe_name}"
-    rm -rf "$install_dir"
+    rm -rf "${install_dir:?}"
     mkdir -p "$install_dir"
     cp -r "$ext_dir/"* "$install_dir/"
 
@@ -71,6 +85,10 @@ cmd_fetch() {
     local found_any=0
     while IFS= read -r bin; do
         if file "$bin" | grep -q "ELF 64-bit LSB"; then
+            if ! _is_aarch64_elf "$bin"; then
+                echo "[glibcx] Skipping non-AArch64 ELF: $(basename "$bin")" >&2
+                continue
+            fi
             found_any=1
             # glibc binaries have libc.so.6 in NEEDED; Bionic has libc.so without version
             if readelf -d "$bin" 2>/dev/null | grep -q "libc.so.6"; then

@@ -1,7 +1,7 @@
 cmd_setup() {
     echo "[glibcx] Initializing setup and prerequisites..."
     pkg update -y
-    pkg install glibc-runner patchelf binutils xxd file jq clang curl nodejs -y
+    pkg install glibc-runner binutils file jq clang curl nodejs -y
 
     init_env
 
@@ -28,19 +28,6 @@ cmd_setup() {
         echo "[glibcx]   1. Install Shizuku from Play Store"
         echo "[glibcx]   2. Pair via wireless debugging (Settings > Developer options)"
         echo "[glibcx]   3. Re-run 'glibcx setup'"
-    fi
-
-    # Fix glibc-runner linker script issue
-    # The glibc-runner package ships libc.so as a text linker script (normal for compilation).
-    # However, if any library or fallback probes for libc.so at runtime, ld.so will crash
-    # with "invalid ELF header". We safely move it and symlink to the real ELF.
-    local glibc_lib="${PREFIX}/glibc/lib"
-    if [[ -f "${glibc_lib}/libc.so" ]] && ! [[ -L "${glibc_lib}/libc.so" ]]; then
-        if file "${glibc_lib}/libc.so" | grep -qi "text"; then
-            echo "[glibcx] Applying Termux glibc-runner libc.so text-script fix..."
-            mv "${glibc_lib}/libc.so" "${glibc_lib}/libc.so.script"
-            ln -s "libc.so.6" "${glibc_lib}/libc.so"
-        fi
     fi
 
     echo "[glibcx] Setup complete. Restart your shell or run: source ~/.bashrc"
