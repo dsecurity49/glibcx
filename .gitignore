@@ -1,3 +1,10 @@
-blueprint.md
-agents.md
-session-*.md
+# Build artifacts
+glibcx-bin
+*.tar.gz
+*.tgz
+*.zip
+
+# OS / Editor files
+.DS_Store
+.vscode/
+.idea/
