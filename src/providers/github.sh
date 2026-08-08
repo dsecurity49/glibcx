@@ -34,6 +34,28 @@ cmd_gh() {
     local bad_ext_filter='[.]sha256$|[.]sha512$|[.]sig$|[.]asc$|[.]deb$|[.]rpm$|[.]AppImage$|[.]json$|[.]txt$'
     local arch_pattern='aarch64|arm64|armv8'
 
+    # 1. Look for a native Android/Bionic asset first
+    local android_url
+    android_url=$(echo "$release_json" | jq -r \
+        --arg bad "$bad_ext_filter" \
+        --arg arch "$arch_pattern" \
+        '.assets[]
+         | select(
+             (.name | ascii_downcase | test($bad) | not)
+             and (.name | ascii_downcase | test("android"))
+             and (.name | ascii_downcase | test($arch))
+           )
+         | .browser_download_url' | head -n1)
+
+    if [[ -n "$android_url" && "$android_url" != "null" ]]; then
+        echo "[glibcx] Native Android asset found, skipping patch."
+        echo "[glibcx] Selected asset: $android_url"
+        cmd_fetch "$android_url" "${repo##*/}"
+        return
+    fi
+
+    echo "[glibcx] No native Android asset found, falling back to Linux glibc build..."
+
     # Select Linux ARM64 GNU (glibc) binaries only.
     # Explicitly EXCLUDE:
     #   - android  (these are Bionic-linked, not glibc)

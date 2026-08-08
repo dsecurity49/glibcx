@@ -223,6 +223,13 @@ int main(int argc, const char **argv, const char **envp) {
     size_t envc    = 0; while (envp[envc]) envc++;
     size_t new_argc = (size_t)argc + 3;
 
+    if (new_argc >= MAX_ARGS) {
+        die("too many arguments (limit 4096)");
+    }
+    if (envc >= MAX_ENV) {
+        die("environment too large (limit 4096)");
+    }
+
     size_t argv_a[MAX_ARGS];
     argv_a[0] = PUSH_STR(ldso);
     argv_a[1] = PUSH_STR("--library-path");
