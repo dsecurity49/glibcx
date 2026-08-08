@@ -16,6 +16,8 @@ cat src/common.sh \
     src/providers/npm.sh \
     src/providers/github.sh \
     src/providers/intercept.sh \
+    src/providers/vendor.sh \
+    src/providers/selfupdate.sh \
     src/main.sh >> "$OUT"
 
 chmod +x "$OUT"

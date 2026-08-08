@@ -4,16 +4,11 @@
 
 Run unmodified Linux glibc ARM64 binaries natively on Termux without PRoot, ptrace, or syscall interception overhead.
 
-[Installation](#installation) • [Limitations / Scope](#limitations--scope) • [Usage](#usage) • [Verified binaries](#verified-binaries) • [Benchmark](#benchmark)
-
 ## How it works
 
 1. The original binary remains untouched.
 2. A native AArch64 C wrapper is compiled that uses `mmap` to load the Termux glibc loader (`ld-linux-aarch64.so.1`).
 3. It jumps to the loader via inline assembly within the same process. No `execve` is called.
-
-**The `/proc/self/exe` limitation:**
-Because `execve` is never called, `/proc/self/exe` points to the compiled wrapper stub (`~/.glibcx/bin/<name>`), not the actual target binary. Re-executing `/proc/self/exe` still works in practice (e.g., Claude Code's auto-restart) because the wrapper is an idempotent entry point that re-runs the same load sequence. However, any program that resolves bundled resources or asset files relative to its binary directory will look in `~/.glibcx/bin/` and fail.
 
 ## Installation
 
@@ -36,12 +31,10 @@ Installs prerequisites via `pkg`, downloads the latest release binary, and confi
 
 ## Features
 
-* **Native execution.** Wrappers call the glibc dynamic linker directly with zero syscall interception.
-* **Immune to Android 15 seccomp changes.** glibcx never uses `ptrace`. It is structurally unaffected by the Android 15 seccomp tightening (like `set_robust_list` filtering) that currently breaks `proot-distro` for many users.
-* **Drift detection.** Every wrapper bakes in an `mtime+size` fingerprint. If the binary self-updates, you get a clear error instead of a silent crash.
-* **Smart providers.** One command to install from GitHub Releases, NPM, arbitrary URLs, or intercepted install scripts.
-* **GLIBC version audit.** Warns before patching if the binary requires a newer glibc than Termux provides.
-* **Non-glibc dep advisory.** Flags external `NEEDED` libraries that will fail at runtime.
+* **Native execution:** Calls the glibc dynamic linker directly with zero syscall interception.
+* **Immune to Android 15 seccomp changes:** Never uses `ptrace`, bypassing `set_robust_list` filtering that breaks `proot-distro`.
+* **Drift detection:** Re-patch warnings if a binary updates itself.
+* **Dep advisories:** Audits GLIBC version requirements and flags missing external shared libraries.
 
 ## Usage
 
@@ -90,10 +83,12 @@ glibcx run ./my-binary -- --help  # ephemeral trial run, no file changes
 ```bash
 glibcx list               # all managed binaries with drift/version status
 glibcx info <path>        # full registry entry
-glibcx restore <path>     # remove wrapper, restore original binary
+glibcx restore <path>     # remove wrapper, restore original binary (alias: unpatch)
+glibcx vendor <bin> <lib> # copy external .so files into the wrapper's library path
 glibcx upgrade <path>     # re-patch after a self-update
 glibcx clean              # remove registry entries for deleted binaries
 glibcx benchmark          # download 11 binaries and run 3-way speed comparison
+glibcx self-update [--force] # update glibcx to the latest release
 ```
 
 ## Verified binaries

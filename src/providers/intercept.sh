@@ -22,8 +22,8 @@ cmd_intercept() {
     local existing_files new_files
     existing_files=$(mktemp)
     new_files=$(mktemp)
-    _intercept_cleanup() { rm -f "$existing_files" "$new_files"; }
-    trap _intercept_cleanup EXIT
+    # shellcheck disable=SC2064
+    trap "rm -f \"$existing_files\" \"$new_files\"" EXIT
 
     echo "[glibcx] Taking pre-install snapshot of common bin directories..."
     for d in "${mon_dirs[@]}"; do

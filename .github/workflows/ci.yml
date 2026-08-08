@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: ["main", "release/**"]
+    tags: ["v*"]
   pull_request:
     branches: ["main", "release/**"]
 
@@ -84,7 +85,10 @@ jobs:
         id: tag
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload glibcx binary as release asset
+      - name: Generate checksum
+        run: sha256sum glibcx > glibcx.sha256
+
+      - name: Upload glibcx binary and checksum as release assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
@@ -97,6 +101,8 @@ jobs:
             ```
 
             ## What's changed
-            See [commits](https://github.com/dsecurity49/glibcx/commits/${{ steps.tag.outputs.tag }}) for details.
-          files: glibcx
+            See [CHANGELOG.md](https://github.com/dsecurity49/glibcx/blob/main/CHANGELOG.md) for details.
+          files: |
+            glibcx
+            glibcx.sha256
           fail_on_unmatched_files: true

@@ -1,5 +1,5 @@
 # Known glibc-provided libraries — anything outside this set is a non-glibc dep
-_GLIBC_LIBS_RE="^(ld-linux|lib(c|m|dl|pthread|rt|util|resolv|nsl|crypt|anl|nss_))"
+_GLIBC_LIBS_RE="^(ld-linux|lib(c|m|dl|pthread|rt|util|resolv|nsl|crypt|anl|nss_|gcc_s|stdc\+\+))"
 
 cmd_patch() {
     init_env
@@ -233,7 +233,7 @@ int main(int argc, const char **argv, const char **envp) {
     size_t argv_a[MAX_ARGS];
     argv_a[0] = PUSH_STR(ldso);
     argv_a[1] = PUSH_STR("--library-path");
-    argv_a[2] = PUSH_STR("${GLIBC_LIB_DIR}");
+    argv_a[2] = PUSH_STR("${GLIBC_LIB_DIR}:${CLI_STORAGE}/lib/${bin_name}");
     argv_a[3] = PUSH_STR(target_exe);
     for (size_t i = 1; i < (size_t)argc; i++) argv_a[i + 3] = PUSH_STR(argv[i]);
     size_t execfn = argv_a[3];

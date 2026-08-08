@@ -26,8 +26,8 @@ cmd_fetch() {
     local safe_name="${custom_name//\//_}"
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    _fetch_cleanup() { rm -rf "$tmp_dir"; }
-    trap _fetch_cleanup EXIT
+    # shellcheck disable=SC2064
+    trap "rm -rf \"$tmp_dir\"" EXIT
 
     echo "[glibcx] Downloading $url ..."
     if ! curl -fSL --progress-bar "$url" -o "$tmp_dir/$filename"; then

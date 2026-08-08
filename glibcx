@@ -180,7 +180,7 @@ cmd_setup() {
     echo "[glibcx] Setup complete. Restart your shell or run: source ~/.bashrc"
 }
 # Known glibc-provided libraries — anything outside this set is a non-glibc dep
-_GLIBC_LIBS_RE="^(ld-linux|lib(c|m|dl|pthread|rt|util|resolv|nsl|crypt|anl|nss_))"
+_GLIBC_LIBS_RE="^(ld-linux|lib(c|m|dl|pthread|rt|util|resolv|nsl|crypt|anl|nss_|gcc_s|stdc\+\+))"
 
 cmd_patch() {
     init_env
@@ -414,7 +414,7 @@ int main(int argc, const char **argv, const char **envp) {
     size_t argv_a[MAX_ARGS];
     argv_a[0] = PUSH_STR(ldso);
     argv_a[1] = PUSH_STR("--library-path");
-    argv_a[2] = PUSH_STR("${GLIBC_LIB_DIR}");
+    argv_a[2] = PUSH_STR("${GLIBC_LIB_DIR}:${CLI_STORAGE}/lib/${bin_name}");
     argv_a[3] = PUSH_STR(target_exe);
     for (size_t i = 1; i < (size_t)argc; i++) argv_a[i + 3] = PUSH_STR(argv[i]);
     size_t execfn = argv_a[3];
@@ -922,8 +922,8 @@ cmd_fetch() {
     local safe_name="${custom_name//\//_}"
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    _fetch_cleanup() { rm -rf "$tmp_dir"; }
-    trap _fetch_cleanup EXIT
+    # shellcheck disable=SC2064
+    trap "rm -rf \"$tmp_dir\"" EXIT
 
     echo "[glibcx] Downloading $url ..."
     if ! curl -fSL --progress-bar "$url" -o "$tmp_dir/$filename"; then
@@ -1041,9 +1041,8 @@ cmd_npm() {
     echo "[glibcx] Downloading $tarball_url ..."
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    # SC2064: use a function so variables expand at cleanup time, not now
-    _npm_cleanup() { rm -rf "$tmp_dir" "${bin_paths_file:-}"; }
-    trap _npm_cleanup EXIT
+    # shellcheck disable=SC2064
+    trap "rm -rf \"$tmp_dir\"" EXIT
 
     if ! curl -fSL --progress-bar "$tarball_url" -o "$tmp_dir/package.tgz"; then
         echo "[glibcx] Error: Download failed." >&2
@@ -1063,6 +1062,8 @@ cmd_npm() {
     # 4. Resolve bin paths safely (no word-splitting)
     local bin_paths_file
     bin_paths_file=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -rf \"$tmp_dir\"; rm -f \"$bin_paths_file\"" EXIT
     jq -r '.bin | if type=="string" then . elif type=="object" then to_entries[].value else empty end' \
         "$pkg_json" 2>/dev/null > "$bin_paths_file" || true
 
@@ -1218,8 +1219,8 @@ cmd_intercept() {
     local existing_files new_files
     existing_files=$(mktemp)
     new_files=$(mktemp)
-    _intercept_cleanup() { rm -f "$existing_files" "$new_files"; }
-    trap _intercept_cleanup EXIT
+    # shellcheck disable=SC2064
+    trap "rm -f \"$existing_files\" \"$new_files\"" EXIT
 
     echo "[glibcx] Taking pre-install snapshot of common bin directories..."
     for d in "${mon_dirs[@]}"; do
@@ -1265,20 +1266,130 @@ cmd_intercept() {
         echo "[glibcx] Intercept complete."
     fi
 }
+cmd_vendor() {
+    local target_bin="${1:-}"
+    shift
+    if [[ -z "$target_bin" || $# -eq 0 ]]; then
+        echo "Usage: glibcx vendor <binary_path> <lib1.so> [lib2.so...]" >&2
+        echo "Example: glibcx vendor $(which hurl) /path/to/libxml2.so.2" >&2
+        exit 1
+    fi
+
+    init_env
+    target_bin="$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")"
+
+    if [[ -z "$(json_get_val "$target_bin" "orig_hash")" ]]; then
+        echo "[glibcx] Error: '$target_bin' is not in the registry. Use 'glibcx patch' first." >&2
+        exit 1
+    fi
+
+    local bin_name
+    bin_name="$(basename "$target_bin")"
+    local lib_dir="${CLI_STORAGE}/lib/${bin_name}"
+    mkdir -p "$lib_dir"
+
+    for lib_file in "$@"; do
+        if [[ -f "$lib_file" ]]; then
+            echo "[glibcx] Vendoring $(basename "$lib_file") for $bin_name..."
+            cp "$lib_file" "$lib_dir/"
+        else
+            echo "[glibcx] Warning: Library file not found: $lib_file" >&2
+        fi
+    done
+
+    echo "[glibcx] Done. Vendored libraries are stored in: $lib_dir"
+}
+cmd_selfupdate() {
+    local REPO="dsecurity49/glibcx"
+    local API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+
+    echo "[glibcx] Checking for updates..."
+    
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[glibcx] Error: 'jq' is required. Run 'glibcx setup' first." >&2
+        exit 1
+    fi
+
+    local release_json
+    if ! release_json=$(curl -fsSL "$API_URL"); then
+        echo "[glibcx] Error: Could not fetch latest release. Check your connection or wait for the first GitHub Release to be published." >&2
+        exit 1
+    fi
+    
+    local latest_tag
+    latest_tag=$(echo "$release_json" | jq -r '.tag_name')
+
+    if [[ -z "$latest_tag" || "$latest_tag" == "null" ]]; then
+        echo "[glibcx] Error: Could not determine latest release version." >&2
+        exit 1
+    fi
+
+    # Retrieve current version by running the executable itself
+    local current_version
+    current_version=$("$0" --help | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || echo "unknown")
+
+    if [[ "$latest_tag" == "$current_version" ]]; then
+        echo "[glibcx] You are already on the latest version ($current_version)."
+        return 0
+    fi
+
+    echo "[glibcx] New version found: $latest_tag (current: $current_version)"
+    
+    local asset_url
+    asset_url=$(echo "$release_json" | jq -r '.assets[] | select(.name == "glibcx") | .browser_download_url' | head -n1)
+
+    if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
+        echo "[glibcx] Error: Could not find 'glibcx' binary asset in latest release." >&2
+        exit 1
+    fi
+
+    local exe_path
+    exe_path="$(realpath "$0")"
+
+    if [[ ! -w "$exe_path" ]]; then
+        echo "[glibcx] Error: Current executable ($exe_path) is not writable." >&2
+        echo "[glibcx] Please update manually or run with appropriate permissions." >&2
+        exit 1
+    fi
+
+    echo "[glibcx] Downloading $latest_tag..."
+    local tmp_bin
+    tmp_bin="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f \"$tmp_bin\"" EXIT
+
+    if ! curl -fSL --progress-bar "$asset_url" -o "$tmp_bin"; then
+        echo "[glibcx] Error: Download failed." >&2
+        exit 1
+    fi
+
+    if ! head -1 "$tmp_bin" | grep -q "bash\|sh"; then
+        echo "[glibcx] Error: Downloaded file does not look like a valid glibcx binary." >&2
+        exit 1
+    fi
+
+    chmod +x "$tmp_bin"
+    mv "$tmp_bin" "$exe_path"
+    
+    echo "[glibcx] Successfully updated to $latest_tag."
+    echo "[glibcx] Run 'glibcx --help' to verify."
+}
 cmd_help() {
     cat << HELP
-glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.1.1)
+glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.2.0)
 
 USAGE:
     glibcx setup                   Install prerequisites and configure PATH / Shizuku
     glibcx patch <binary_path>     Audit, register, and compile a native wrapper
     glibcx run <binary> [-- args]  Ephemeral trial execution via ld.so (no file changes)
-    glibcx restore <binary_path>   Restore original binary and remove wrapper
+    glibcx restore <binary_path>   Restore original binary and remove wrapper (alias: unpatch)
+    glibcx vendor <binary> <libs>  Copy external .so files into the wrapper's library path
     glibcx upgrade <binary_path>   Re-patch a registered binary (after self-update)
     glibcx list                    List all managed binaries with status and drift check
     glibcx info <binary_path>      Show full registry entry for a binary
     glibcx clean                   Remove registry entries for missing binaries
     glibcx benchmark               Download + patch 10 popular binaries not in Termux
+    glibcx self-update [--force]   Update glibcx to the latest release
 
 SMART PROVIDERS:
     glibcx npm install <pkg>       Smart-install an NPM package (Android-native first)
@@ -1303,19 +1414,21 @@ HELP
 }
 
 case "${1:-}" in
-    setup)     cmd_setup ;;
-    npm)       shift; cmd_npm "$@" ;;
-    gh)        shift; cmd_gh "$@" ;;
-    fetch)     shift; cmd_fetch "$@" ;;
-    intercept) shift; cmd_intercept "$@" ;;
-    patch)     cmd_patch "${2:-}" ;;
-    restore)   cmd_restore "${2:-}" ;;
-    upgrade)   cmd_upgrade "${2:-}" ;;
-    list)      cmd_list ;;
-    info)      cmd_info "${2:-}" ;;
-    clean)     cmd_clean ;;
-    run)       shift; cmd_run "$@" ;;
-    benchmark) cmd_bench ;;
+    setup)       cmd_setup ;;
+    npm)         shift; cmd_npm "$@" ;;
+    gh)          shift; cmd_gh "$@" ;;
+    fetch)       shift; cmd_fetch "$@" ;;
+    intercept)   shift; cmd_intercept "$@" ;;
+    patch)       cmd_patch "${2:-}" ;;
+    restore|unpatch) cmd_restore "${2:-}" ;;
+    vendor)      shift; cmd_vendor "$@" ;;
+    upgrade)     cmd_upgrade "${2:-}" ;;
+    list)        cmd_list ;;
+    info)        cmd_info "${2:-}" ;;
+    clean)       cmd_clean ;;
+    run)         shift; cmd_run "$@" ;;
+    benchmark)   cmd_bench ;;
+    self-update) cmd_selfupdate ;;
     help|--help|-h) cmd_help ;;
-    *)         cmd_help; exit 1 ;;
+    *)           cmd_help; exit 1 ;;
 esac
