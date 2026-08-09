@@ -21,7 +21,7 @@ loader_dirs=(/lib /usr/lib)
 if [[ -n "${PREFIX:-}" && -d "${PREFIX}/glibc/lib" ]]; then
   loader_dirs=("${PREFIX}/glibc/lib" "${loader_dirs[@]}")
 fi
-LDSO=$(find "${loader_dirs[@]}" -name "ld-linux-aarch64.so.1" 2>/dev/null | head -1 || true)
+LDSO=$(find "${loader_dirs[@]}" -name "ld-linux-aarch64.so.1" -type f -print -quit 2>/dev/null || true)
 [[ -n "$LDSO" ]] || fail "ld-linux-aarch64.so.1 not found on this system"
 LIBDIR=$(dirname "$LDSO")
 info "ld.so   : $LDSO"
@@ -29,7 +29,8 @@ info "lib dir : $LIBDIR"
 
 # ── 2. Download fd ───────────────────────────────────────────────────────────
 info "Fetching latest fd release info..."
-RELEASE=$(curl -fsSL https://api.github.com/repos/sharkdp/fd/releases/latest)
+RELEASE=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+  https://api.github.com/repos/sharkdp/fd/releases/latest)
 URL=$(echo "$RELEASE" | jq -r '
   .assets[]
   | select(
@@ -45,9 +46,10 @@ info "Downloading: $URL"
 TEST_TMP_DIR=$(mktemp -d)
 trap cleanup EXIT
 
-curl -fsSL "$URL" -o "$TEST_TMP_DIR/fd.tar.gz"
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+  "$URL" -o "$TEST_TMP_DIR/fd.tar.gz"
 tar -xzf "$TEST_TMP_DIR/fd.tar.gz" -C "$TEST_TMP_DIR"
-FD_BIN=$(find "$TEST_TMP_DIR" -name "fd" -type f -executable | head -1 || true)
+FD_BIN=$(find "$TEST_TMP_DIR" -name "fd" -type f -executable -print -quit || true)
 [[ -n "$FD_BIN" ]] || fail "fd binary not found in tarball"
 TARGET="$TEST_TMP_DIR/fd-test\\name"
 cp "$FD_BIN" "$TARGET"
@@ -73,6 +75,13 @@ awk '/^#include <stdio\.h>/{found=1} found && /^C_CODE$/{exit} found{print}' src
       -e "s|\${patched_fp}|${FP}|g" \
       -e "s|\${ldso_c_bytes}|${LDSO_BYTES}|g" \
       -e "s|\${library_path_c_bytes}|${LIBRARY_PATH_BYTES}|g" \
+      -e 's|\${env_real_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+      -e 's|\${env_wrapper_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+      -e 's|\${env_app_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+      -e 's|\${env_mode_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+      -e 's|\${env_tunables_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+      -e 's|\${trace_marker_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+      -e 's|\${proc_exe_shim_c_bytes}|0x00|g' \
   > "$TEST_TMP_DIR/fd_wrapper.c"
 
 LINES=$(wc -l < "$TEST_TMP_DIR/fd_wrapper.c")
@@ -97,7 +106,16 @@ info "Found $COUNT .sh files"
 [[ "$COUNT" -ge 5 ]] || fail "fd found too few .sh files ($COUNT) — expected ≥5"
 pass "fd -e sh found $COUNT files"
 
-# ── 7. Drift detection ────────────────────────────────────────────────────────
+# ── 7. Controlled loader tracing ─────────────────────────────────────────────
+info "Running fd through the wrapper's internal trace channel"
+TRACE_OUT=$("$TEST_TMP_DIR/fd_wrapper" X=1 --version 2>&1 || true)
+echo "$TRACE_OUT" | grep -qE 'file=|find library=' \
+  || fail "Internal trace channel did not enable loader diagnostics"
+echo "$TRACE_OUT" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+' \
+  || fail "Internal trace marker leaked into target arguments"
+pass "controlled LD_DEBUG trace enabled and marker stripped"
+
+# ── 8. Drift detection ────────────────────────────────────────────────────────
 info "Testing drift detection (touch binary to change mtime)..."
 sleep 1
 touch "$TARGET"

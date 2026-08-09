@@ -10,8 +10,16 @@ echo "" >> "$OUT"
 # Concatenate modules (ensure newline between modules to avoid token merging)
 modules=(
     src/common.sh \
+    src/lock.sh \
+    src/state.sh \
+    src/elf.sh \
+    src/runtime.sh \
+    src/wrapper.sh \
+    src/resolver.sh \
     src/setup.sh \
     src/patch.sh \
+    src/doctor.sh \
+    src/trace.sh \
     src/bench.sh \
     src/providers/fetch.sh \
     src/providers/npm.sh \

@@ -49,11 +49,32 @@ jobs:
                 -e 's|\${patched_fp}|1_2_3_4_5|g' \
                 -e 's|\${ldso_c_bytes}|0x2f, 0x6c, 0x69, 0x62, 0x2f, 0x6c, 0x64, 0x2e, 0x73, 0x6f, 0x00|g' \
                 -e 's|\${library_path_c_bytes}|0x2f, 0x6c, 0x69, 0x62, 0x00|g' \
+                -e 's|\${env_real_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+                -e 's|\${env_wrapper_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+                -e 's|\${env_app_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+                -e 's|\${env_mode_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+                -e 's|\${env_tunables_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+                -e 's|\${trace_marker_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+                -e 's|\${proc_exe_shim_c_bytes}|0x00|g' \
             > /tmp/wrapper_check.c
           echo "Extracted $(wc -l < /tmp/wrapper_check.c) lines of C"
           clang -fsyntax-only \
             -Wall -Wextra -Wno-unused-parameter \
             /tmp/wrapper_check.c
+          clang -O2 -Wall -Wextra -Wno-unused-parameter \
+            /tmp/wrapper_check.c -o /tmp/wrapper_check
+          LC_ALL=C objdump -d --disassemble=main /tmp/wrapper_check > /tmp/wrapper_main.dis
+          LC_ALL=C grep -Eq '[[:space:]]br[[:space:]]+x[0-9]+' /tmp/wrapper_main.dis
+          if LC_ALL=C awk '
+            /[[:space:]]br[[:space:]]+x[0-9]+/ {after_transfer=1; next}
+            after_transfer && /[[:space:]](ret|bl|blr)[[:space:]]/ {bad=1}
+            END {exit bad}
+          ' /tmp/wrapper_main.dis; then
+            :
+          else
+            echo "Compiler emitted a return/call after the no-return loader branch." >&2
+            exit 1
+          fi
 
   # ── Job 3: Verify the checked-in executable is built from source ────────────
   build:
@@ -77,7 +98,20 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang file jq curl
+          sudo apt-get install -y clang file jq curl util-linux patchelf gnupg xz-utils
+
+      - name: Run schema and state tests
+        run: |
+          bash ci/state_test.sh
+          bash ci/elf_test.sh
+          bash ci/runtime_test.sh
+          bash ci/profile_builder_test.sh
+          bash ci/release_assets_test.sh
+          bash ci/loader_test.sh
+          bash ci/repository_test.sh
+          bash ci/proc_exe_test.sh
+          bash ci/provider_args_test.sh
+          bash ci/provider_archive_test.sh
 
       - name: Run integration test
         run: bash ci/integration_test.sh
@@ -86,38 +120,17 @@ jobs:
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-26.04-arm
-    if: startsWith(github.ref, 'refs/tags/v')
+    # v0.3 release publication stays disabled until the maintainer completes
+    # the offline primary-key ceremony and explicitly authorizes protected CI
+    # signing-key setup. Publishing the unsigned legacy asset set would violate
+    # the v0.3 trust contract enforced by install.sh and self-update.
+    if: ${{ false && startsWith(github.ref, 'refs/tags/v') }}
     needs: [lint, c-wrapper-syntax, build, integration]
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Get tag name
-        id: tag
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-
-      - name: Build release artifact and generate checksum
+      - name: Release signing is not provisioned
         run: |
-          bash build.sh
-          mv glibcx-bin glibcx
-          sha256sum glibcx > glibcx.sha256
-
-      - name: Upload glibcx binary and checksum as release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
-          body: |
-            ## Install
-
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/dsecurity49/glibcx/main/install.sh | bash
-            ```
-
-            ## What's changed
-            See [CHANGELOG.md](https://github.com/dsecurity49/glibcx/blob/main/CHANGELOG.md) for details.
-          files: |
-            glibcx
-            glibcx.sha256
-          fail_on_unmatched_files: true
+          echo "Protected release signing has not been authorized or provisioned." >&2
+          echo "Keep this job disabled until the offline-key ceremony and device gates are complete." >&2
+          exit 1
