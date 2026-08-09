@@ -4,6 +4,7 @@
   "glibc_packages_commit": "4ebab91fde95c9768868631462a08fcbf677f8b3",
   "termux_packages_repository": "https://github.com/termux/termux-packages.git",
   "termux_packages_commit": "fa4e9a5411aa49c6edf8e7f16077f518b2d5d2fa",
+  "builder_image": "ghcr.io/termux/package-builder-cgct@sha256:e6a401b0c47b51f886dbd63d33f257ef9b3668cf24602f1cb6628a6d5e2656f3",
   "glibc_version": "2.43",
   "termux_package_revision": "1",
   "source_url": "https://ftp.gnu.org/gnu/libc/glibc-2.43.tar.xz",

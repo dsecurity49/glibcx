@@ -25,9 +25,9 @@ on:
         required: true
         type: string
       publish:
-        description: Publish and permanently lock the verified draft
+        description: Continue to protected approval after the draft is independently verified
         required: true
-        default: false
+        default: true
         type: boolean
 
 concurrency:
@@ -91,6 +91,7 @@ jobs:
           test -f release-input/build-metadata.json
           locked_glibc_commit=$(jq -r '.glibc_packages_commit' profiles/runtime-source.lock.json)
           locked_termux_commit=$(jq -r '.termux_packages_commit' profiles/runtime-source.lock.json)
+          locked_builder_image=$(jq -r '.builder_image' profiles/runtime-source.lock.json)
           locked_source_sha256=$(jq -r '.source_sha256' profiles/runtime-source.lock.json)
           jq -e \
             --arg commit "$commit" \
@@ -98,6 +99,7 @@ jobs:
             --argjson source_date_epoch "$SOURCE_DATE_EPOCH" \
             --arg glibc_commit "$locked_glibc_commit" \
             --arg termux_commit "$locked_termux_commit" \
+            --arg builder_image "$locked_builder_image" \
             --arg source_sha256 "$locked_source_sha256" '
             .schema == 1
             and .glibcx_commit == $commit
@@ -106,8 +108,8 @@ jobs:
             and (.profile_id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
             and .glibc_packages_commit == $glibc_commit
             and .termux_packages_commit == $termux_commit
+            and .builder_image == $builder_image
             and .source_sha256 == $source_sha256
-            and (.builder_image | test("^ghcr[.]io/termux/package-builder-cgct@sha256:[0-9a-f]{64}$"))
           ' release-input/build-metadata.json >/dev/null
           profile_id=$(jq -r '.profile_id' release-input/build-metadata.json)
           test -d "release-input/payload/${profile_id}.payload"

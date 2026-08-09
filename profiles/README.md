@@ -49,23 +49,36 @@ revocation certificate never enter CI.
 
 ## Build the runtime
 
-After the candidate passes its pre-tag gates and an annotated production tag
-exists, dispatch `.github/workflows/runtime-profile.yml` with:
+After the final candidate passes CI, dispatch
+`.github/workflows/runtime-profile.yml` with:
 
-- the production tag;
+- the intended production tag;
+- the candidate's full 40-character commit in `candidate_commit`;
 - a new profile ID;
-- the tag timestamp as `source_date_epoch`; and
-- `ghcr.io/termux/package-builder-cgct` pinned by a full SHA-256 digest.
+- a fixed reproducible timestamp as `source_date_epoch`; and
+- the builder image already pinned in `runtime-source.lock.json`.
 
 The workflow builds for the final prefix, verifies the GNU source archive,
 records its inputs, prepares the inventory, and uploads the
-`glibcx-runtime-profile` artifact.
+`glibcx-runtime-profile` artifact. This pre-tag build prevents a broken
+runtime build from consuming a production version. After it succeeds, create
+the annotated tag at that exact commit. The protected release workflow rejects
+the artifact if the tag points anywhere else. Reuse the same source timestamp
+when dispatching the protected release.
+
+For a deliberate post-tag rebuild, leave `candidate_commit` empty; the workflow
+then requires the named tag to be annotated.
+
+Before tagging, the final candidate must pass `ci/android_device_matrix.sh` on
+at least one physical AArch64 Termux device available to the maintainer.
+Additional Android versions, vendors, and page sizes are valuable published
+evidence, not mandatory release blockers.
 
 ## Stage and publish the release
 
 Dispatch `.github/workflows/release.yml` with the successful profile-build run
-ID, artifact name, next catalog version, and the same source timestamp. Keep
-`publish` set to `false` on the first run.
+ID, artifact name, next catalog version, and the same source timestamp. For a
+production release, set `publish` to `true` in this single dispatch.
 
 The protected jobs then:
 
@@ -75,10 +88,16 @@ The protected jobs then:
 4. create attestations and upload a complete draft release; and
 5. compare the uploaded digests with the verified local files.
 
-Review that draft before dispatching the workflow with `publish` set to `true`.
-If any asset needs to change, make a new version and tag; do not replace an
-asset in place. Publication checks that GitHub locked the release and that every
-asset still matches its attestation.
+After verification, the publish job waits for a second `production-release`
+environment approval. Inspect the complete draft at that pause, then approve or
+reject publication. Do not try to resume a `publish=false` run with a second
+dispatch: the new run correctly refuses to replace the existing draft.
+
+If any asset needs to change, reject publication and make a new version and
+tag; do not replace an asset in place. Publication checks that GitHub locked the
+release and that every asset still matches its attestation. `publish=false`
+exists only for non-production workflow rehearsals whose draft and tag will not
+be reused.
 
 The repository variables are:
 

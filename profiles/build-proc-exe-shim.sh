@@ -11,12 +11,21 @@ sysroot="$1"
 source_file="$2"
 output_file="$3"
 
-for required_path in include/stdio.h lib/libc.so.6; do
-    [[ -f "${sysroot}/${required_path}" ]] || {
-        echo "[proc-shim] Error: incomplete glibc sysroot (missing $required_path)." >&2
-        exit 1
-    }
+[[ -f "${sysroot}/include/stdio.h" || -f "${sysroot}/usr/include/stdio.h" ]] || {
+    echo "[proc-shim] Error: incomplete glibc sysroot (missing stdio.h)." >&2
+    exit 1
+}
+libc_path=""
+for library_root in "${sysroot}/lib" "${sysroot}/usr/lib"; do
+    [[ -d "$library_root" ]] || continue
+    libc_path=$(find -L "$library_root" -name libc.so.6 -type f -print 2>/dev/null \
+        | LC_ALL=C sed -n '1p')
+    [[ -n "$libc_path" ]] && break
 done
+[[ -n "$libc_path" ]] || {
+    echo "[proc-shim] Error: incomplete glibc sysroot (missing libc.so.6)." >&2
+    exit 1
+}
 [[ -f "$source_file" ]] \
     || { echo "[proc-shim] Error: source file is missing." >&2; exit 1; }
 command -v clang >/dev/null 2>&1 \

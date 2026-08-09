@@ -11,6 +11,10 @@ I only have access to a limited number of Android devices, so results from other
 phones are genuinely useful. Repeated Android versions and phone models are
 useful too; vendors ship different kernels and security policies.
 
+No particular Android version is a prerequisite for helping, and missing
+community coverage for a version does not block a release. The results below
+state exactly what was tested instead of implying coverage that does not exist.
+
 From a clean checkout of the commit you want to test, install the test tools:
 
 ```bash

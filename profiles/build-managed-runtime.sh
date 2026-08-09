@@ -33,6 +33,7 @@ glibc_repository=$(read_lock glibc_packages_repository)
 glibc_commit=$(read_lock glibc_packages_commit)
 termux_repository=$(read_lock termux_packages_repository)
 termux_commit=$(read_lock termux_packages_commit)
+locked_builder_image=$(read_lock builder_image)
 glibc_version=$(read_lock glibc_version)
 package_revision=$(read_lock termux_package_revision)
 source_url=$(read_lock source_url)
@@ -41,6 +42,8 @@ source_sha256=$(read_lock source_sha256)
 [[ "$glibc_commit" =~ ^[0-9a-f]{40}$ && "$termux_commit" =~ ^[0-9a-f]{40}$ \
     && "$source_sha256" =~ ^[0-9a-f]{64}$ ]] \
     || { echo "[profile-build] Error: invalid pinned source lock." >&2; exit 1; }
+[[ "$BUILDER_IMAGE" == "$locked_builder_image" ]] \
+    || { echo "[profile-build] Error: builder image does not match the source lock." >&2; exit 1; }
 
 output_parent=$(dirname "$OUTPUT_DIR")
 output_name=$(basename "$OUTPUT_DIR")
