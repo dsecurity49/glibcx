@@ -24,12 +24,12 @@ assert_rejected_without_state() {
 }
 
 assert_rejected_without_state gh "unknown gh option" \
-    ./glibcx gh install owner/repo --unknown
+    bash ./glibcx gh install owner/repo --unknown
 assert_rejected_without_state npm "unknown npm option" \
-    ./glibcx npm install package --unknown
+    bash ./glibcx npm install package --unknown
 assert_rejected_without_state fetch "unknown fetch option" \
-    ./glibcx fetch https://example.invalid/tool --unknown
+    bash ./glibcx fetch https://example.invalid/tool --unknown
 assert_rejected_without_state intercept "unknown intercept option" \
-    ./glibcx intercept true --unknown
+    bash ./glibcx intercept true --unknown
 
 printf '\nAll provider argument tests passed.\n'
