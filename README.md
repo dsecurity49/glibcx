@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/dsecurity49/glibcx/actions/workflows/ci.yml/badge.svg)](https://github.com/dsecurity49/glibcx/actions/workflows/ci.yml)
 
-Run compatible Linux ARM64 (glibc) CLI tools on Termux—without PRoot.
+Patches and runs glibc-linked Linux ARM64 CLI tools natively under Termux's Bionic environment.
 
 ## How it works
 
