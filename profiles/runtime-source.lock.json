@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "glibc_packages_repository": "https://github.com/termux-pacman/glibc-packages.git",
+  "glibc_packages_commit": "4ebab91fde95c9768868631462a08fcbf677f8b3",
+  "termux_packages_repository": "https://github.com/termux/termux-packages.git",
+  "termux_packages_commit": "fa4e9a5411aa49c6edf8e7f16077f518b2d5d2fa",
+  "glibc_version": "2.43",
+  "termux_package_revision": "1",
+  "source_url": "https://ftp.gnu.org/gnu/libc/glibc-2.43.tar.xz",
+  "source_sha256": "d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
+}

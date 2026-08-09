@@ -35,11 +35,15 @@ printf 'fixture build recipe and corresponding source\n' >"${source_tree}/README
 
 fixture_gnupg="${TEST_TMP_DIR}/gnupg"
 mkdir -m 700 "$fixture_gnupg"
-GNUPGHOME="$fixture_gnupg" gpg --batch --pinentry-mode loopback --passphrase '' \
+fixture_passphrase='fixture-release-passphrase'
+fixture_passphrase_file="${TEST_TMP_DIR}/fixture-passphrase"
+printf '%s' "$fixture_passphrase" >"$fixture_passphrase_file"
+chmod 600 "$fixture_passphrase_file"
+GNUPGHOME="$fixture_gnupg" gpg --batch --pinentry-mode loopback --passphrase "$fixture_passphrase" \
     --quick-gen-key 'glibcx release fixture <fixture@invalid>' ed25519 cert 1d >/dev/null 2>&1
 fixture_fingerprint=$(GNUPGHOME="$fixture_gnupg" gpg --batch --with-colons --list-keys \
     | awk -F: '$1 == "fpr" {print $10; exit}')
-GNUPGHOME="$fixture_gnupg" gpg --batch --pinentry-mode loopback --passphrase '' \
+GNUPGHOME="$fixture_gnupg" gpg --batch --pinentry-mode loopback --passphrase "$fixture_passphrase" \
     --quick-add-key "$fixture_fingerprint" ed25519 sign 1d >/dev/null 2>&1
 fixture_signing_fingerprint=$(GNUPGHOME="$fixture_gnupg" gpg --batch --with-colons --list-secret-keys \
     | awk -F: '$1 == "fpr" {count++; if (count == 2) {print $10; exit}}')
@@ -69,6 +73,7 @@ package_once() {
         SIGNING_KEY_FINGERPRINT="$fixture_signing_fingerprint" \
         RELEASE_PRIMARY_FINGERPRINT="$fixture_fingerprint" \
         SOURCE_DATE_EPOCH="$source_epoch" \
+        SIGNING_KEY_PASSPHRASE_FILE="$fixture_passphrase_file" \
         GLIBCX_BINARY=./glibcx \
         bash profiles/package-release.sh \
             7 v0.3.0 "${payload_output}/${profile_id}.payload" \
@@ -121,6 +126,11 @@ _runtime_apply_inventory_modes "$extracted" "${extracted}/profile.json"
 _runtime_inventory_verify "$extracted" "${extracted}/profile.json" >/dev/null \
     || fail "packaged profile inventory failed client verification"
 pass "generated catalog and nested runtime trust chain"
+
+bash ci/verify-release-assets.sh \
+    "$assets" v0.3.0 "$fixture_fingerprint" "$fixture_signing_fingerprint" >/dev/null \
+    || fail "standalone protected-release verifier rejected the fixture assets"
+pass "standalone protected-release verifier"
 
 first_hashes=$(find "$assets" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort \
     | while IFS= read -r asset_name; do

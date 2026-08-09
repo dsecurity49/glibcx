@@ -1,0 +1,288 @@
+name: Protected release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated production tag (for example v0.3.0)
+        required: true
+        type: string
+      profile_run_id:
+        description: Successful runtime-profile workflow run containing the candidate artifact
+        required: true
+        type: string
+      profile_artifact:
+        description: Runtime-profile artifact name
+        required: true
+        default: glibcx-runtime-profile
+        type: string
+      catalog_version:
+        description: Monotonically increasing signed catalog version
+        required: true
+        type: string
+      source_date_epoch:
+        description: Reproducible Unix timestamp for the release
+        required: true
+        type: string
+      publish:
+        description: Publish and permanently lock the verified draft
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: protected-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  package:
+    name: Sign and stage release
+    runs-on: ubuntu-26.04-arm
+    environment: production-release
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    outputs:
+      commit: ${{ steps.preflight.outputs.commit }}
+      profile_id: ${{ steps.preflight.outputs.profile_id }}
+    env:
+      TAG: ${{ inputs.tag }}
+      CATALOG_VERSION: ${{ inputs.catalog_version }}
+      SOURCE_DATE_EPOCH: ${{ inputs.source_date_epoch }}
+      PRIMARY_FINGERPRINT: ${{ vars.GLIBCX_RELEASE_PRIMARY_FINGERPRINT }}
+      SIGNING_FINGERPRINT: ${{ vars.GLIBCX_RELEASE_SIGNING_FINGERPRINT }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Download the prepared runtime profile
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.profile_artifact }}
+          path: release-input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.profile_run_id }}
+
+      - name: Validate immutable release inputs
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$CATALOG_VERSION" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]
+          [[ "$PRIMARY_FINGERPRINT" =~ ^[0-9A-Fa-f]{40,64}$ ]]
+          [[ "$SIGNING_FINGERPRINT" =~ ^[0-9A-Fa-f]{40,64}$ ]]
+          test "$(git cat-file -t "$TAG")" = tag
+          commit=$(git rev-list -n 1 "$TAG")
+          version=${TAG#v}
+          grep -Fqx "GLIBCX_VERSION=\"${version}\"" src/common.sh
+          test -s keys/glibcx-release.gpg
+          observed_primary=$(LC_ALL=C gpg --batch --show-keys --with-colons keys/glibcx-release.gpg \
+            | LC_ALL=C awk -F: '$1 == "fpr" {print toupper($10); exit}')
+          test "$observed_primary" = "${PRIMARY_FINGERPRINT^^}"
+          test -f release-input/build-metadata.json
+          locked_glibc_commit=$(jq -r '.glibc_packages_commit' profiles/runtime-source.lock.json)
+          locked_termux_commit=$(jq -r '.termux_packages_commit' profiles/runtime-source.lock.json)
+          locked_source_sha256=$(jq -r '.source_sha256' profiles/runtime-source.lock.json)
+          jq -e \
+            --arg commit "$commit" \
+            --arg tag "$TAG" \
+            --argjson source_date_epoch "$SOURCE_DATE_EPOCH" \
+            --arg glibc_commit "$locked_glibc_commit" \
+            --arg termux_commit "$locked_termux_commit" \
+            --arg source_sha256 "$locked_source_sha256" '
+            .schema == 1
+            and .glibcx_commit == $commit
+            and .release_tag == $tag
+            and .source_date_epoch == $source_date_epoch
+            and (.profile_id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+            and .glibc_packages_commit == $glibc_commit
+            and .termux_packages_commit == $termux_commit
+            and .source_sha256 == $source_sha256
+            and (.builder_image | test("^ghcr[.]io/termux/package-builder-cgct@sha256:[0-9a-f]{64}$"))
+          ' release-input/build-metadata.json >/dev/null
+          profile_id=$(jq -r '.profile_id' release-input/build-metadata.json)
+          test -d "release-input/payload/${profile_id}.payload"
+          test -d release-input/corresponding-source
+          jq -e \
+            --arg profile_id "$profile_id" \
+            --arg glibc_commit "$locked_glibc_commit" \
+            --arg source_sha256 "$locked_source_sha256" '
+              .profile_id == $profile_id
+              and .build.termux_glibc_commit == $glibc_commit
+              and .build.source_sha256 == $source_sha256
+            ' "release-input/payload/${profile_id}.payload/profile.json" >/dev/null
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+          echo "profile_id=$profile_id" >>"$GITHUB_OUTPUT"
+
+      - name: Import protected signing subkey
+        shell: bash
+        env:
+          SIGNING_SUBKEY_B64: ${{ secrets.GLIBCX_RELEASE_SIGNING_SUBKEY_B64 }}
+          SIGNING_PASSPHRASE: ${{ secrets.GLIBCX_RELEASE_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGNING_SUBKEY_B64"
+          test -n "$SIGNING_PASSPHRASE"
+          echo "::add-mask::$SIGNING_PASSPHRASE"
+          install -d -m 700 "$RUNNER_TEMP/release-gnupg"
+          printf '%s' "$SIGNING_SUBKEY_B64" | base64 --decode >"$RUNNER_TEMP/release-subkey.gpg"
+          printf '%s' "$SIGNING_PASSPHRASE" >"$RUNNER_TEMP/release-passphrase"
+          chmod 600 "$RUNNER_TEMP/release-subkey.gpg" "$RUNNER_TEMP/release-passphrase"
+          GNUPGHOME="$RUNNER_TEMP/release-gnupg" gpg --batch --import "$RUNNER_TEMP/release-subkey.gpg"
+          secret_fingerprints=$(GNUPGHOME="$RUNNER_TEMP/release-gnupg" \
+            LC_ALL=C gpg --batch --with-colons --list-secret-keys \
+            | LC_ALL=C awk -F: '$1 == "fpr" {print toupper($10)}')
+          grep -Fqx "${SIGNING_FINGERPRINT^^}" <<<"$secret_fingerprints"
+
+      - name: Assemble and verify signed assets
+        shell: bash
+        env:
+          GNUPGHOME: ${{ runner.temp }}/release-gnupg
+          SIGNING_KEY_PASSPHRASE_FILE: ${{ runner.temp }}/release-passphrase
+        run: |
+          set -euo pipefail
+          profile_id=${{ steps.preflight.outputs.profile_id }}
+          SIGNING_KEY_FINGERPRINT="$SIGNING_FINGERPRINT" \
+          RELEASE_PRIMARY_FINGERPRINT="$PRIMARY_FINGERPRINT" \
+          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+          SIGNING_KEY_PASSPHRASE_FILE="$SIGNING_KEY_PASSPHRASE_FILE" \
+          GNUPGHOME="$GNUPGHOME" \
+            bash profiles/package-release.sh \
+              "$CATALOG_VERSION" "$TAG" \
+              "release-input/payload/${profile_id}.payload" \
+              release-input/corresponding-source release-assets
+          bash ci/verify-release-assets.sh \
+            release-assets "$TAG" "$PRIMARY_FINGERPRINT" "$SIGNING_FINGERPRINT"
+
+      - name: Generate GitHub artifact attestations
+        uses: actions/attest@v4
+        with:
+          subject-path: release-assets/*
+
+      - name: Preserve assets for the verification job
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-${{ inputs.tag }}
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create the fully populated draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release '$TAG' already exists; corrections require a new tag." >&2
+            exit 1
+          fi
+          gh release create "$TAG" release-assets/* \
+            --verify-tag --draft --title "$TAG" \
+            --notes "Signed glibcx release candidate. Publication is gated by independent asset verification."
+
+      - name: Remove imported private material
+        if: always()
+        shell: bash
+        run: |
+          release_secret_dir="$RUNNER_TEMP/release-gnupg"
+          release_subkey="$RUNNER_TEMP/release-subkey.gpg"
+          release_passphrase="$RUNNER_TEMP/release-passphrase"
+          [[ -d "$release_secret_dir" ]] && rm -rf "${release_secret_dir:?}"
+          [[ -f "$release_subkey" ]] && rm -f "$release_subkey"
+          [[ -f "$release_passphrase" ]] && rm -f "$release_passphrase"
+
+  verify:
+    name: Verify draft release
+    needs: package
+    runs-on: ubuntu-26.04-arm
+    permissions:
+      actions: read
+      contents: read
+    env:
+      TAG: ${{ inputs.tag }}
+      PRIMARY_FINGERPRINT: ${{ vars.GLIBCX_RELEASE_PRIMARY_FINGERPRINT }}
+      SIGNING_FINGERPRINT: ${{ vars.GLIBCX_RELEASE_SIGNING_FINGERPRINT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-release-${{ inputs.tag }}
+          path: release-assets
+
+      - name: Verify OpenPGP, hashes, schemas, source, and uploaded bytes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ci/verify-release-assets.sh \
+            release-assets "$TAG" "$PRIMARY_FINGERPRINT" "$SIGNING_FINGERPRINT"
+          release_state=$(gh release view "$TAG" --json isDraft,isPrerelease,assets)
+          test "$(jq -r '.isDraft' <<<"$release_state")" = true
+          test "$(jq -r '.isPrerelease' <<<"$release_state")" = false
+          remote_digests=$(jq -r '.assets[] | [.name, .digest] | @tsv' <<<"$release_state")
+          asset_count=0
+          for asset in release-assets/*; do
+            name=${asset##*/}
+            local_digest="sha256:$(LC_ALL=C sha256sum "$asset" | LC_ALL=C awk '{print $1}')"
+            remote_digest=$(LC_ALL=C awk -F '\t' -v wanted="$name" \
+              '$1 == wanted {print $2}' <<<"$remote_digests")
+            test "$local_digest" = "$remote_digest"
+            asset_count=$((asset_count + 1))
+          done
+          test "$asset_count" -eq 10
+
+  publish:
+    name: Publish immutable release
+    if: ${{ inputs.publish }}
+    needs: [package, verify]
+    runs-on: ubuntu-26.04-arm
+    environment: production-release
+    permissions:
+      attestations: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-release-${{ inputs.tag }}
+          path: release-assets
+
+      - name: Publish only the verified draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --draft=false --latest --verify-tag
+          immutable=false
+          for _attempt in $(seq 1 20); do
+            immutable=$(gh api \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.immutable')
+            [[ "$immutable" == true ]] && break
+            sleep 3
+          done
+          test "$immutable" = true
+          gh release verify "$TAG" >/dev/null
+          for asset in release-assets/*; do
+            gh release verify-asset "$TAG" "$asset" >/dev/null
+          done
+          printf 'Immutable release verified: %s at %s\n' "$TAG" "${{ needs.package.outputs.commit }}"

@@ -101,10 +101,17 @@ fi
 
 sign_file() {
     local input_file="$1" output_file="$2"
-    LC_ALL=C gpg --batch --yes --armor --detach-sign \
-        --faked-system-time "${SOURCE_DATE_EPOCH}!" \
-        --local-user "${SIGNING_KEY_FINGERPRINT}!" \
-        --output "$output_file" "$input_file"
+    local sign_args=(
+        --batch --yes --armor --detach-sign
+        --faked-system-time "${SOURCE_DATE_EPOCH}!"
+        --local-user "${SIGNING_KEY_FINGERPRINT}!"
+    )
+    if [[ -n "${SIGNING_KEY_PASSPHRASE_FILE:-}" ]]; then
+        [[ -f "$SIGNING_KEY_PASSPHRASE_FILE" ]] \
+            || { echo "[release] Error: signing passphrase file is unavailable." >&2; exit 1; }
+        sign_args+=(--pinentry-mode loopback --passphrase-file "$SIGNING_KEY_PASSPHRASE_FILE")
+    fi
+    LC_ALL=C gpg "${sign_args[@]}" --output "$output_file" "$input_file"
 }
 
 sign_file "${profile_stage}/profile.json" "${profile_stage}/profile.json.asc"

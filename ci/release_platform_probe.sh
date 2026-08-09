@@ -4,6 +4,7 @@
 set -euo pipefail
 
 repo="${GLIBCX_GITHUB_REPOSITORY:-dsecurity49/glibcx}"
+dry_run_tag="v0.3.0-dry-run.2"
 command -v gh >/dev/null 2>&1 \
     || { echo "FAIL: GitHub CLI is required." >&2; exit 1; }
 
@@ -23,4 +24,20 @@ if ! gh attestation --help >/dev/null 2>&1; then
     exit 1
 fi
 echo "PASS: GitHub CLI exposes artifact-attestation verification."
-echo "NOTE: the protected dry run must still create and verify a real attestation."
+
+dry_run=$(gh api \
+    -H 'X-GitHub-Api-Version: 2026-03-10' \
+    "repos/${repo}/releases/tags/${dry_run_tag}") \
+    || { echo "FAIL: protected dry-run release is unavailable." >&2; exit 1; }
+if ! jq -e '
+    .draft == false
+    and .prerelease == true
+    and .immutable == true
+    and (.assets | length) == 10
+' <<<"$dry_run" >/dev/null; then
+    echo "FAIL: protected dry-run release is not immutable and complete." >&2
+    exit 1
+fi
+gh release verify "$dry_run_tag" --repo "$repo" >/dev/null \
+    || { echo "FAIL: protected dry-run release attestation did not verify." >&2; exit 1; }
+echo "PASS: ${dry_run_tag} is immutable with ten attested assets."

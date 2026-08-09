@@ -31,6 +31,13 @@ jobs:
             --severity=warning \
             --exclude=SC2034,SC2148,SC1091
 
+      - name: GitHub Actions workflow lint
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
+            -ignore 'label "ubuntu-26.04-arm" is unknown' \
+            -ignore 'shellcheck reported issue.*SC2016' \
+            .github/workflows/*.yml
+
   # ── Job 2: C wrapper compile check ─────────────────────────────────────────
   c-wrapper-syntax:
     name: C wrapper compile check
@@ -115,22 +122,3 @@ jobs:
 
       - name: Run integration test
         run: bash ci/integration_test.sh
-
-  # ── Job 5: Publish GitHub Release (on version tag only) ────────────────────
-  release:
-    name: Publish GitHub Release
-    runs-on: ubuntu-26.04-arm
-    # v0.3 release publication stays disabled until the maintainer completes
-    # the offline primary-key ceremony and explicitly authorizes protected CI
-    # signing-key setup. Publishing the unsigned legacy asset set would violate
-    # the v0.3 trust contract enforced by install.sh and self-update.
-    if: ${{ false && startsWith(github.ref, 'refs/tags/v') }}
-    needs: [lint, c-wrapper-syntax, build, integration]
-    permissions:
-      contents: write
-    steps:
-      - name: Release signing is not provisioned
-        run: |
-          echo "Protected release signing has not been authorized or provisioned." >&2
-          echo "Keep this job disabled until the offline-key ceremony and device gates are complete." >&2
-          exit 1
