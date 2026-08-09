@@ -127,7 +127,8 @@ _runtime_inventory_verify "$extracted" "${extracted}/profile.json" >/dev/null \
     || fail "packaged profile inventory failed client verification"
 pass "generated catalog and nested runtime trust chain"
 
-bash ci/verify-release-assets.sh \
+standalone_home="${TEST_TMP_DIR}/standalone-home"
+env HOME="$standalone_home" bash ci/verify-release-assets.sh \
     "$assets" v0.3.0 "$fixture_fingerprint" "$fixture_signing_fingerprint" >/dev/null \
     || fail "standalone protected-release verifier rejected the fixture assets"
 pass "standalone protected-release verifier"

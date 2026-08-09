@@ -28,6 +28,17 @@ source src/common.sh
 # shellcheck source=../src/runtime.sh
 source src/runtime.sh
 
+# This verifier runs before glibcx has initialized user state. Keep helper and
+# GnuPG scratch files isolated instead of assuming HOME or ~/.glibcx/tmp exists.
+verification_root=$(mktemp -d)
+cleanup() { rm -rf "${verification_root:?}"; }
+trap cleanup EXIT
+TMP_DIR="${verification_root}/runtime-tmp"
+mkdir -p "$TMP_DIR"
+GNUPGHOME="${verification_root}/gnupg"
+export GNUPGHOME
+mkdir -m 700 "$GNUPGHOME"
+
 keyring="${ASSETS_DIR}/glibcx-release.gpg"
 catalog="${ASSETS_DIR}/glibcx-profiles-v1.json"
 catalog_signature="${catalog}.asc"
@@ -97,9 +108,8 @@ jq -e \
     || { echo "[verify-release] Error: corresponding-source hash mismatch." >&2; exit 1; }
 
 _runtime_archive_validate "${ASSETS_DIR}/${bundle_name}"
-verification_dir=$(mktemp -d)
-cleanup() { rm -rf "${verification_dir:?}"; }
-trap cleanup EXIT
+verification_dir="${verification_root}/bundle"
+mkdir -p "$verification_dir"
 tar -xJf "${ASSETS_DIR}/${bundle_name}" -C "$verification_dir"
 verify_signature "${verification_dir}/profile.json" "${verification_dir}/profile.json.asc"
 
