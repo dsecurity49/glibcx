@@ -51,7 +51,7 @@ common private runtime fields before a result can be merged.
 
 | Android | Device | Kernel | Page size | Termux | Commit | Result | Issue |
 |---|---|---|---:|---|---|---|---|
-| _No reviewed reports yet_ | | | | | | | |
+| 12 (API 31) | vivo V2022 | 4.14.180-perf+ | 4 KB | F-Droid 0.119.0-beta.3 | `aa1fd46` | Pass | Maintainer test |
 
 This table records where glibcx has actually been exercised. It is evidence,
 not a promise that every binary will work on every device.
