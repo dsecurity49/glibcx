@@ -1,9 +1,9 @@
 # Production release-key ceremony
 
 Run this ceremony on an offline machine controlled by the maintainer. Do not
-run it in GitHub Actions, an AI-agent session, or the repository worktree. Keep
-the offline primary key, its passphrase, and revocation certificate on encrypted
-offline media with a tested backup.
+run it in a network-connected environment, an automated workflow, or the
+repository worktree. Keep the offline primary key, its passphrase, and
+revocation certificate on encrypted offline media with a tested backup.
 
 ## Offline creation
 
@@ -39,8 +39,8 @@ Only `glibcx-release.gpg` is committed. Set the same primary fingerprint in:
 - `RELEASE_PRIMARY_FINGERPRINT` in `install.sh`; and
 - the README trust section.
 
-Run `./build.sh`, deploy the resulting monolith as required by `AGENTS.md`, and
-verify that the checked-in binary matches a clean rebuild.
+Run `./build.sh`, replace the checked-in monolith with `glibcx-bin`, restore its
+executable bit, and verify that another clean build matches it byte for byte.
 
 ## Protected environment provisioning
 
@@ -49,7 +49,7 @@ approval and restrict deployment to protected production tags. Set these
 public repository variables:
 
 - variable `GLIBCX_RELEASE_PRIMARY_FINGERPRINT`;
-- variable `GLIBCX_RELEASE_SIGNING_FINGERPRINT`;
+- variable `GLIBCX_RELEASE_SIGNING_FINGERPRINT`.
 
 Set these environment secrets:
 

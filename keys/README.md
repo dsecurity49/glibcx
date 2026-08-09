@@ -1,7 +1,7 @@
 # Release-key provisioning
 
 `glibcx-release.gpg` is intentionally absent until the maintainer completes the
-offline production-key ceremony described in `blueprint.md` milestone 8.
+offline production-key ceremony described in `CEREMONY.md`.
 
 The ceremony must export the public primary key here, then pin its full primary
 fingerprint in `src/common.sh`, `install.sh`, and `README.md`. Private keys,

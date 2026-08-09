@@ -16,7 +16,14 @@ Patches and runs glibc-linked Linux ARM64 CLI tools natively under Termux's Bion
 curl -fsSL https://raw.githubusercontent.com/dsecurity49/glibcx/main/install.sh | bash
 ```
 
-Installs prerequisites via `pkg`, downloads the latest release binary, and configures your PATH.
+This command installs the latest published release. The v0.3 development code
+is not installable through it until the production release key and signed v0.3
+assets are published; the installer intentionally fails closed when its trust
+material is absent. Until then, `v0.2.0` remains the stable release.
+
+For a published release, the installer adds prerequisites through `pkg`,
+downloads the release binary, verifies its release assets, and configures your
+PATH.
 
 **Prerequisites (installed automatically):** `glibc-runner`, `clang`, `jq`, `curl`, `file`, `binutils`, `nodejs`, `util-linux`, `gnupg`
 
