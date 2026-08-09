@@ -83,7 +83,12 @@ glibcx self-update
 Run `glibcx help` for the complete command and option list. Add `--verbose` to
 `patch` when you want the full ELF, symbol-version, and dependency audit.
 `patch` also accepts `--dry-run`, `--offline`, `--runtime <profile>`, and
-`--proc-exe=auto|on|off`.
+`--proc-exe=auto|on|off`. Proc-exe compatibility is automatic for recognized
+PyInstaller executables. Its shim comes from the verified managed runtime.
+
+The dependency lock covers libraries loaded by the ELF loader at startup. A
+program may load more libraries later through its own plugin or extraction
+logic; use `trace-libs` when that distinction matters.
 
 ## What v0.3 changes
 
@@ -95,8 +100,8 @@ Run `glibcx help` for the complete command and option list. Add `--verbose` to
   checked, and recorded with the app.
 - Managed runtimes are verified with the glibcx release key before they become
   active.
-- The wrapper removes Android `LD_PRELOAD`, loader paths, and other unsafe
-  loader variables before glibc starts.
+- Both `glibcx run` and the native wrapper remove Android `LD_PRELOAD`,
+  loader paths, and other unsafe loader variables before glibc starts.
 - The launcher uses the device's actual page size and is designed for both
   4 KB and 16 KB AArch64 systems.
 

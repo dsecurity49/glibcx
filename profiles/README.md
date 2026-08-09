@@ -32,8 +32,9 @@ The release artifact includes:
 - enough source and build material to reproduce the package.
 
 Regular files in a profile use mode `0644` or `0755`. Symlinks must resolve
-inside the profile. If the optional `/proc/self/exe` shim is present, it is built
-as a glibc DSO from `proc-exe-shim.c` and included in the signed inventory.
+inside the profile. The `/proc/self/exe` shim is built as a glibc DSO in the
+same pinned builder as glibc and included in the signed inventory. It supports
+self-inspecting executables such as PyInstaller bundles.
 
 `prepare-profile.sh` inventories an unsigned payload. `package-release.sh`
 adds the corresponding-source bundle and creates the ten signed release assets.

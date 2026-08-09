@@ -906,6 +906,15 @@ state_remove_app_files_locked() {
     fi
 }
 
+elf_has_pyinstaller_archive() {
+    local target="$1" trailer
+    [[ -f "$target" ]] || return 1
+    trailer=$(tail -c 8192 "$target" 2>/dev/null \
+        | LC_ALL=C od -An -v -tx1 \
+        | LC_ALL=C tr -d ' \n')
+    [[ "$trailer" == *4d45490c0b0a0b0e* ]]
+}
+
 _elf_lines_to_json() {
     jq -Rsc 'split("\n") | map(select(length > 0))'
 }
@@ -3172,7 +3181,7 @@ _c_byte_array() {
 
 cmd_patch() {
     local target_bin="" runtime_request="" no_verify=false dry_run=false
-    local offline=false refresh=false no_resolve=false proc_exe_mode=off force=false verbose=false
+    local offline=false refresh=false no_resolve=false proc_exe_mode=auto force=false verbose=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --runtime)
@@ -3337,11 +3346,23 @@ cmd_patch() {
     local patched_fp
     patched_fp=$(_fingerprint "$target_bin")
     if [[ "$proc_exe_mode" == auto ]]; then
-        if jq -e --arg basename "$bin_name" --arg hash "$orig_hash" '
+        local needs_proc_exe=false
+        if elf_has_pyinstaller_archive "$target_bin"; then
+            needs_proc_exe=true
+        elif jq -e --arg basename "$bin_name" --arg hash "$orig_hash" '
             (.proc_exe_shim.path // "") != ""
             and ((.proc_exe_shim.auto_targets // [])
                 | any(.basename == $basename and (.sha256 == null or .sha256 == $hash)))
         ' <<<"$profile_json" >/dev/null; then
+            needs_proc_exe=true
+        fi
+        if [[ "$needs_proc_exe" == true ]]; then
+            if [[ "$(jq -r '.kind' <<<"$profile_json")" != managed ]] \
+                || [[ -z "$(jq -r '.proc_exe_shim.path // empty' <<<"$profile_json")" ]]; then
+                echo "[glibcx] Error: this self-inspecting binary requires a managed runtime with proc-exe support." >&2
+                echo "[glibcx] Install a current managed runtime, or use --proc-exe=off only for diagnosis." >&2
+                exit 1
+            fi
             proc_exe_mode=on
         else
             proc_exe_mode=off
@@ -4255,7 +4276,16 @@ cmd_run() {
         echo "[glibcx] Error: registered wrapper is missing or not executable." >&2
         exit 1
     fi
-    exec "$wrapper_path" "$@"
+    exec env \
+        -u LD_PRELOAD \
+        -u LD_LIBRARY_PATH \
+        -u GLIBC_LD_LIBRARY_PATH \
+        -u LD_AUDIT \
+        -u LD_DEBUG \
+        -u LD_DEBUG_OUTPUT \
+        -u LD_PROFILE \
+        -u GLIBC_TUNABLES \
+        "$wrapper_path" "$@"
 }
 
 _doctor_loader_command() {
@@ -5802,7 +5832,7 @@ USAGE:
       --offline                    Use only installed profiles and cached packages
       --refresh                    Refresh authenticated repository metadata
       --no-resolve                 Do not fetch unresolved startup DSOs
-      --proc-exe=auto|on|off       Select optional /proc/self/exe compatibility mode
+      --proc-exe=auto|on|off       Select /proc/self/exe compatibility mode (default: auto)
       --no-verify                  Explicitly record an unverified wrapper
       --verbose                    Show the full dependency and GLIBC audit
     glibcx run <binary> [-- args]  Ephemeral execution through its registered runtime

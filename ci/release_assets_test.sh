@@ -26,6 +26,14 @@ fi
 [[ -n "$source_loader" && -n "$source_libc" ]] \
     || fail "AArch64 glibc fixture is unavailable"
 
+if [[ -d "${PREFIX:-/nonexistent}/glibc/include" ]]; then
+    shim_sysroot="${PREFIX}/glibc"
+else
+    shim_sysroot=/
+fi
+proc_shim="${TEST_TMP_DIR}/proc-exe-shim.so"
+bash profiles/build-proc-exe-shim.sh "$shim_sysroot" profiles/proc-exe-shim.c "$proc_shim"
+
 prepared_tree="${TEST_TMP_DIR}/prepared"
 source_tree="${TEST_TMP_DIR}/corresponding-source"
 mkdir -p "${prepared_tree}/lib" "$source_tree"
@@ -62,6 +70,7 @@ env \
     BUILD_SOURCE_SHA256=0000000000000000000000000000000000000000000000000000000000000000 \
     CORRESPONDING_SOURCE_URL="https://github.com/dsecurity49/glibcx/releases/download/v0.3.0/glibcx-runtime-${profile_id}-source.tar.xz" \
     TOOLCHAIN_DESCRIPTION=ubuntu-26.04-arm-clang \
+    PROC_SHIM_BINARY="$proc_shim" \
     SOURCE_DATE_EPOCH="$source_epoch" \
     bash profiles/prepare-profile.sh \
         "$profile_id" "$prepared_tree" "$final_prefix" "$payload_output" >/dev/null

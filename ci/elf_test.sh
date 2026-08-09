@@ -51,6 +51,18 @@ jq -e '.valid == false and (.errors | index("not a readable ELF file")) != null'
     <<<"$invalid_inspection" >/dev/null || fail "non-ELF input did not fail closed"
 pass "non-ELF rejection"
 
+pyinstaller_fixture="${TEST_TMP_DIR}/pyinstaller-fixture"
+plain_fixture="${TEST_TMP_DIR}/plain-fixture"
+cp "$glibc_target" "$pyinstaller_fixture"
+cp "$glibc_target" "$plain_fixture"
+printf 'MEI\014\013\012\013\016fixture-cookie' >>"$pyinstaller_fixture"
+elf_has_pyinstaller_archive "$pyinstaller_fixture" \
+    || fail "PyInstaller archive cookie was not detected"
+if elf_has_pyinstaller_archive "$plain_fixture"; then
+    fail "plain ELF was misidentified as a PyInstaller executable"
+fi
+pass "PyInstaller archive detection"
+
 if command -v patchelf >/dev/null 2>&1; then
     runpath_target="${TEST_TMP_DIR}/runpath-target"
     rpath_target="${TEST_TMP_DIR}/rpath-target"

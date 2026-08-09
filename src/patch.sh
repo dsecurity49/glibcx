@@ -17,7 +17,7 @@ _c_byte_array() {
 
 cmd_patch() {
     local target_bin="" runtime_request="" no_verify=false dry_run=false
-    local offline=false refresh=false no_resolve=false proc_exe_mode=off force=false verbose=false
+    local offline=false refresh=false no_resolve=false proc_exe_mode=auto force=false verbose=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --runtime)
@@ -182,11 +182,23 @@ cmd_patch() {
     local patched_fp
     patched_fp=$(_fingerprint "$target_bin")
     if [[ "$proc_exe_mode" == auto ]]; then
-        if jq -e --arg basename "$bin_name" --arg hash "$orig_hash" '
+        local needs_proc_exe=false
+        if elf_has_pyinstaller_archive "$target_bin"; then
+            needs_proc_exe=true
+        elif jq -e --arg basename "$bin_name" --arg hash "$orig_hash" '
             (.proc_exe_shim.path // "") != ""
             and ((.proc_exe_shim.auto_targets // [])
                 | any(.basename == $basename and (.sha256 == null or .sha256 == $hash)))
         ' <<<"$profile_json" >/dev/null; then
+            needs_proc_exe=true
+        fi
+        if [[ "$needs_proc_exe" == true ]]; then
+            if [[ "$(jq -r '.kind' <<<"$profile_json")" != managed ]] \
+                || [[ -z "$(jq -r '.proc_exe_shim.path // empty' <<<"$profile_json")" ]]; then
+                echo "[glibcx] Error: this self-inspecting binary requires a managed runtime with proc-exe support." >&2
+                echo "[glibcx] Install a current managed runtime, or use --proc-exe=off only for diagnosis." >&2
+                exit 1
+            fi
             proc_exe_mode=on
         else
             proc_exe_mode=off
@@ -1100,5 +1112,14 @@ cmd_run() {
         echo "[glibcx] Error: registered wrapper is missing or not executable." >&2
         exit 1
     fi
-    exec "$wrapper_path" "$@"
+    exec env \
+        -u LD_PRELOAD \
+        -u LD_LIBRARY_PATH \
+        -u GLIBC_LD_LIBRARY_PATH \
+        -u LD_AUDIT \
+        -u LD_DEBUG \
+        -u LD_DEBUG_OUTPUT \
+        -u LD_PROFILE \
+        -u GLIBC_TUNABLES \
+        "$wrapper_path" "$@"
 }

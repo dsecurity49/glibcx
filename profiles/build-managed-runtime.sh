@@ -89,7 +89,7 @@ grep -Fqx "TERMUX_PKG_SHA256=${source_sha256}" "$recipe"
             -a aarch64 --format pacman --library glibc glibc
 )
 
-package_root="${build_root}/package-root"
+package_root="${glibc_tree}/.glibcx-package-root"
 mkdir -p "$package_root"
 package_count=0
 while IFS= read -r -d '' package_file; do
@@ -104,6 +104,23 @@ prepared_tree="${package_root}/${final_prefix#/}"
 [[ -f "${prepared_tree}/lib/ld-linux-aarch64.so.1" \
     && -f "${prepared_tree}/lib/libc.so.6" ]] \
     || { echo "[profile-build] Error: built package lacks the final-prefix loader/libc pair." >&2; exit 1; }
+
+# Build this DSO in the same digest-pinned container as glibc. Keeping the
+# extracted sysroot below glibc_tree makes the exact tree visible in that
+# container without adding a second mutable toolchain.
+proc_shim="${glibc_tree}/.glibcx-proc-exe-shim.so"
+cp profiles/proc-exe-shim.c "${glibc_tree}/.glibcx-proc-exe-shim.c"
+cp profiles/build-proc-exe-shim.sh "${glibc_tree}/.glibcx-build-proc-exe-shim.sh"
+container_root=/home/builder/termux-packages
+container_sysroot="${container_root}/${package_root#${glibc_tree}/}/${final_prefix#/}"
+TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
+    "${glibc_tree}/scripts/run-docker.sh" bash \
+        "${container_root}/.glibcx-build-proc-exe-shim.sh" \
+        "$container_sysroot" \
+        "${container_root}/.glibcx-proc-exe-shim.c" \
+        "${container_root}/.glibcx-proc-exe-shim.so"
+[[ -f "$proc_shim" ]] \
+    || { echo "[profile-build] Error: proc-exe shim build produced no DSO." >&2; exit 1; }
 
 source_tree="${build_root}/corresponding-source"
 mkdir -p "${source_tree}/build-material"
@@ -123,6 +140,8 @@ cp "${glibc_tree}/LICENSE.md" "${source_tree}/glibc-packages-LICENSE.md"
 cp "${termux_tree}/LICENSE.md" "${source_tree}/termux-packages-LICENSE.md"
 cp "$LOCK_FILE" "${source_tree}/runtime-source.lock.json"
 cp profiles/README.md "${source_tree}/BUILDING.md"
+cp profiles/proc-exe-shim.c "${source_tree}/proc-exe-shim.c"
+cp profiles/build-proc-exe-shim.sh "${source_tree}/build-proc-exe-shim.sh"
 
 payload_root="${build_root}/payload"
 corresponding_source_url="https://github.com/dsecurity49/glibcx/releases/download/${RELEASE_TAG}/glibcx-runtime-${PROFILE_ID}-source.tar.xz"
@@ -134,6 +153,7 @@ env \
     BUILD_SOURCE_SHA256="$source_sha256" \
     CORRESPONDING_SOURCE_URL="$corresponding_source_url" \
     TOOLCHAIN_DESCRIPTION="$BUILDER_IMAGE; termux-packages@$termux_commit" \
+    PROC_SHIM_BINARY="$proc_shim" \
     SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     bash profiles/prepare-profile.sh \
         "$PROFILE_ID" "$prepared_tree" "$final_prefix" "$payload_root"

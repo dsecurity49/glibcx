@@ -1,3 +1,12 @@
+elf_has_pyinstaller_archive() {
+    local target="$1" trailer
+    [[ -f "$target" ]] || return 1
+    trailer=$(tail -c 8192 "$target" 2>/dev/null \
+        | LC_ALL=C od -An -v -tx1 \
+        | LC_ALL=C tr -d ' \n')
+    [[ "$trailer" == *4d45490c0b0a0b0e* ]]
+}
+
 _elf_lines_to_json() {
     jq -Rsc 'split("\n") | map(select(length > 0))'
 }

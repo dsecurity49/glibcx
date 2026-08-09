@@ -27,6 +27,14 @@ fi
 [[ -n "$source_loader" && -n "$source_libc" ]] \
     || fail "AArch64 glibc fixture is unavailable"
 
+if [[ -d "${PREFIX:-/nonexistent}/glibc/include" ]]; then
+    shim_sysroot="${PREFIX}/glibc"
+else
+    shim_sysroot=/
+fi
+proc_shim="${TEST_TMP_DIR}/proc-exe-shim.so"
+bash profiles/build-proc-exe-shim.sh "$shim_sysroot" profiles/proc-exe-shim.c "$proc_shim"
+
 prepared_tree="${TEST_TMP_DIR}/prepared"
 mkdir -p "${prepared_tree}/lib" "${prepared_tree}/share/glibcx"
 cp "$source_loader" "${prepared_tree}/lib/ld-linux-aarch64.so.1"
@@ -47,6 +55,7 @@ build_payload() {
         BUILD_SOURCE_SHA256=0000000000000000000000000000000000000000000000000000000000000000 \
         CORRESPONDING_SOURCE_URL=https://example.invalid/glibc-2.42-source.tar.xz \
         TOOLCHAIN_DESCRIPTION=ubuntu-26.04-arm-clang \
+        PROC_SHIM_BINARY="$proc_shim" \
         TERMUX_INSTALL_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}" \
         SOURCE_DATE_EPOCH=1767225600 \
         bash profiles/prepare-profile.sh \
@@ -63,6 +72,12 @@ cmp "${first_payload}/profile.json" "${second_payload}/profile.json" >/dev/null 
 [[ ! -e "${first_payload}/lib/libc.a" ]] || fail "SDK archive leaked into runtime payload"
 [[ "$(stat -c '%a' "${first_payload}/share/glibcx/helper")" == 755 ]] \
     || fail "executable payload mode was not preserved"
+[[ -f "${first_payload}/lib/glibcx-proc-exe-shim.so" ]] \
+    || fail "proc-exe shim was not included in the payload"
+jq -e '.proc_exe_shim.path
+        | endswith("/lib/glibcx-proc-exe-shim.so")' \
+    "${first_payload}/profile.json" >/dev/null \
+    || fail "proc-exe shim was not recorded in the profile"
 pass "deterministic manifest and runtime-only payload"
 
 _runtime_profile_manifest_validate \

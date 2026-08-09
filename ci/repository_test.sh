@@ -55,6 +55,17 @@ else
 fi
 [[ -n "$source_dso" ]] || fail "libz fixture DSO is unavailable"
 
+bundled_origin="${TEST_TMP_DIR}/bundled-app"
+mkdir -p "$bundled_origin" "${TEST_TMP_DIR}/empty-app-lib"
+cp "$source_dso" "${bundled_origin}/libz.so.1"
+bundled_profile='{"library_dirs":[]}'
+bundled_inspection='{"dynamic":{"rpath":[],"runpath":[]}}'
+bundled_resolution=$(_resolver_find_library libz.so.1 \
+    "${TEST_TMP_DIR}/empty-app-lib" "$bundled_profile" "$bundled_origin" "$bundled_inspection")
+[[ "$bundled_resolution" == "${bundled_origin}/libz.so.1" ]] \
+    || fail "same-directory bundled DSO was not preferred"
+pass "same-directory bundled DSO resolution"
+
 repository_root="${TEST_TMP_DIR}/repo"
 package_root="${TEST_TMP_DIR}/package-root"
 package_pool="${repository_root}/pool/stable/z/zlib-fixture"

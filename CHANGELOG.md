@@ -15,7 +15,8 @@ All notable changes to this project will be documented in this file.
 - Added deterministic profile preparation and complete release-asset assembly (binary, nested runtime signatures, catalog, corresponding source, checksum, and exported public key) with ephemeral-key CI coverage; production publication remains gated on maintainer key provisioning.
 - Added a pinned Termux glibc managed-runtime build workflow and protected draft-first release workflow with independent OpenPGP, hash, schema, source, uploaded-digest, immutable-release, and GitHub-attestation verification.
 - Added an isolated authenticated Termux-glibc repository resolver using signed InRelease metadata, verified Packages/Contents indexes, deterministic SONAME lookup, exact `.deb` hashes, safe symlink-chain extraction, and package/repository provenance locks.
-- Added optional profile-provided `/proc/self/exe` compatibility plumbing and a glibc shim source for read/open target views plus wrapper-routed self-reexecution.
+- Added an inventoried profile-provided `/proc/self/exe` shim, automatic PyInstaller archive detection, read/open target views, and wrapper-routed self-reexecution.
+- Added defense-in-depth loader-environment cleanup to `glibcx run` and explicit regressions for Termux `LD_PRELOAD` and same-directory bundled DSOs.
 - Added controlled `trace-libs` execution through an internal wrapper channel; caller-supplied loader debug variables remain scrubbed.
 - Hardened provider extraction against traversal, hard links, special files, escaping symlinks, control-character paths, and NPM `bin` symlink escapes.
 - Self-update and the bootstrap installer now require both checksums and signatures rooted in the pinned production key; `--force` cannot bypass trust checks.

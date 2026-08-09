@@ -20,15 +20,11 @@ if [[ "$(uname -o 2>/dev/null || true)" == Android ]]; then
     glibc_sysroot="${PREFIX:-/data/data/com.termux/files/usr}/glibc"
     [[ -f "${glibc_sysroot}/lib/Scrt1.o" && -f "${glibc_sysroot}/include/stdio.h" ]] \
         || fail "installed glibc development sysroot is incomplete"
-    clang --target=aarch64-linux-gnu --sysroot="$glibc_sysroot" \
-        -shared -fPIC -nostdlib -O2 -Wall -Wextra -Werror \
-        profiles/proc-exe-shim.c -L"${glibc_sysroot}/lib" \
-        -Wl,-soname,glibcx-proc-exe-shim.so -lc \
-        -o "${TEST_TMP_DIR}/proc-exe-shim.so"
 else
-    clang -shared -fPIC -O2 -Wall -Wextra -Werror \
-        profiles/proc-exe-shim.c -o "${TEST_TMP_DIR}/proc-exe-shim.so" -ldl -pthread
+    glibc_sysroot=/
 fi
+bash profiles/build-proc-exe-shim.sh "$glibc_sysroot" \
+    profiles/proc-exe-shim.c "${TEST_TMP_DIR}/proc-exe-shim.so"
 
 cat >"${TEST_TMP_DIR}/fixture.c" <<'C_CODE'
 #define _GNU_SOURCE

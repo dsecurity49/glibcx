@@ -10,7 +10,7 @@ USAGE:
       --offline                    Use only installed profiles and cached packages
       --refresh                    Refresh authenticated repository metadata
       --no-resolve                 Do not fetch unresolved startup DSOs
-      --proc-exe=auto|on|off       Select optional /proc/self/exe compatibility mode
+      --proc-exe=auto|on|off       Select /proc/self/exe compatibility mode (default: auto)
       --no-verify                  Explicitly record an unverified wrapper
       --verbose                    Show the full dependency and GLIBC audit
     glibcx run <binary> [-- args]  Ephemeral execution through its registered runtime

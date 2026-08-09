@@ -77,15 +77,24 @@ HOME="${TEST_TMP_DIR}/home" "$GLIBCX_UNDER_TEST" rollback "$first_target" 2 \
 pass "retained generations support atomic rollback"
 
 environment_output=$(HOME="${TEST_TMP_DIR}/home" \
+    LD_PRELOAD="${PREFIX}/lib/libtermux-exec-ld-preload.so" \
+    LD_LIBRARY_PATH="${PREFIX}/lib" \
     LD_AUDIT=/does/not/exist.so \
     LD_DEBUG=all \
     LD_PROFILE=bad \
     GLIBC_TUNABLES=glibc.malloc.check=3 \
     GLIBCX_APP_ID=caller-controlled \
     "${TEST_TMP_DIR}/home/.glibcx/bin/${first_id}" -c \
-    'printf "%s|%s|%s|%s" "${LD_AUDIT-unset}" "${LD_DEBUG-unset}" "${GLIBC_TUNABLES-unset}" "$GLIBCX_APP_ID"')
-[[ "$environment_output" == "unset|unset|glibc.malloc.check=0|${first_id}" ]] \
+    'printf "%s|%s|%s|%s|%s|%s" "${LD_PRELOAD-unset}" "${LD_LIBRARY_PATH-unset}" "${LD_AUDIT-unset}" "${LD_DEBUG-unset}" "${GLIBC_TUNABLES-unset}" "$GLIBCX_APP_ID"')
+[[ "$environment_output" == "unset|unset|unset|unset|glibc.malloc.check=0|${first_id}" ]] \
     || fail "wrapper environment isolation failed: $environment_output"
+run_environment_output=$(HOME="${TEST_TMP_DIR}/home" \
+    LD_PRELOAD="${PREFIX}/lib/libtermux-exec-ld-preload.so" \
+    LD_LIBRARY_PATH="${PREFIX}/lib" \
+    "$GLIBCX_UNDER_TEST" run "$first_target" -- -c \
+    'printf "%s|%s" "${LD_PRELOAD-unset}" "${LD_LIBRARY_PATH-unset}"')
+[[ "$run_environment_output" == "unset|unset" ]] \
+    || fail "glibcx run environment isolation failed: $run_environment_output"
 first_manifest=$(jq -r --arg path "$first_target" '.apps[$path].manifest' "$registry")
 jq -e '.wrapper.tunables == ["glibc.malloc.check=0"]' "$first_manifest" >/dev/null \
     || fail "profile tunable allowlist was not recorded in the app manifest"
