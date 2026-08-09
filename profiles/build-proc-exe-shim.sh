@@ -18,8 +18,8 @@ output_file="$3"
 libc_path=""
 for library_root in "${sysroot}/lib" "${sysroot}/usr/lib"; do
     [[ -d "$library_root" ]] || continue
-    libc_path=$(find -L "$library_root" -name libc.so.6 -type f -print 2>/dev/null \
-        | LC_ALL=C sed -n '1p')
+    libc_path=$(find -H "$library_root" -name libc.so.6 \
+        \( -type f -o -type l \) -print -quit 2>/dev/null) || true
     [[ -n "$libc_path" ]] && break
 done
 [[ -n "$libc_path" ]] || {
@@ -33,7 +33,7 @@ command -v clang >/dev/null 2>&1 \
 
 clang --target=aarch64-linux-gnu --sysroot="$sysroot" \
     -shared -fPIC -nostdlib -O2 -Wall -Wextra -Werror \
-    "$source_file" -L"${sysroot}/lib" \
+    "$source_file" -L"$(dirname "$libc_path")" \
     -Wl,-soname,glibcx-proc-exe-shim.so -lc -o "$output_file"
 
 LC_ALL=C readelf -W -h "$output_file" | awk -F: '

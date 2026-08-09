@@ -33,7 +33,9 @@ else
     shim_sysroot=/
 fi
 proc_shim="${TEST_TMP_DIR}/proc-exe-shim.so"
-bash profiles/build-proc-exe-shim.sh "$shim_sysroot" profiles/proc-exe-shim.c "$proc_shim"
+bash profiles/build-proc-exe-shim.sh \
+    "$shim_sysroot" profiles/proc-exe-shim.c "$proc_shim" \
+    || fail "proc-exe shim fixture build failed"
 
 prepared_tree="${TEST_TMP_DIR}/prepared"
 mkdir -p "${prepared_tree}/lib" "${prepared_tree}/share/glibcx"
@@ -62,8 +64,10 @@ build_payload() {
             builder-fixture "$input_tree" "$final_prefix" "$output_dir" >/dev/null
 }
 
-build_payload "${TEST_TMP_DIR}/first"
-build_payload "${TEST_TMP_DIR}/second"
+build_payload "${TEST_TMP_DIR}/first" \
+    || fail "first profile payload preparation failed"
+build_payload "${TEST_TMP_DIR}/second" \
+    || fail "second profile payload preparation failed"
 first_payload="${TEST_TMP_DIR}/first/builder-fixture.payload"
 second_payload="${TEST_TMP_DIR}/second/builder-fixture.payload"
 
