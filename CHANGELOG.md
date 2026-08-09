@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - Hardened provider extraction against traversal, hard links, special files, escaping symlinks, control-character paths, and NPM `bin` symlink escapes.
 - Self-update and the bootstrap installer now require both checksums and signatures rooted in the pinned production key; `--force` cannot bypass trust checks.
 - Added a separate live Termux repository contract probe and concise default patch output with a `--verbose` audit mode.
+- Added a one-command Android device test, sanitized community reports, report-schema validation, and a device-test issue form.
 
 ## [v0.2.0] - 2026-08-08
 ### Added

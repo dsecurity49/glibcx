@@ -1,11 +1,11 @@
 # Release-key provisioning
 
-`glibcx-release.gpg` is intentionally absent until the maintainer completes the
-offline production-key ceremony described in `CEREMONY.md`.
+`glibcx-release.gpg` has not been added yet. It is created during the offline
+production-key ceremony in [`CEREMONY.md`](CEREMONY.md).
 
-The ceremony must export the public primary key here, then pin its full primary
+The ceremony exports the public key into this directory and pins its primary
 fingerprint in `src/common.sh`, `install.sh`, and `README.md`. Private keys,
-revocation certificates, and passphrases must never enter this repository.
+revocation certificates, and passphrases do not belong in the repository.
 
-CI tests generate short-lived fixture keys only inside private temporary
-directories. Those keys are never release trust material.
+CI creates short-lived fixture keys in temporary directories. They are test
+data, not release keys.

@@ -16,7 +16,7 @@ publication dry run also passed on that date:
 - GitHub reported `immutable: true`; and
 - `gh release verify` plus `gh release verify-asset` passed for every asset.
 
-The prerelease is retained as auditable non-production evidence. The fixture
-OpenPGP key is not production trust material. Production OpenPGP verification
-remains mandatory even though immutable releases and GitHub release
-attestations are now proven supplementary gates.
+The prerelease remains available as non-production evidence. Its fixture
+OpenPGP key is not a release key. The dry run shows that GitHub's immutable
+release and attestation checks work for this repository; production releases
+still require the pinned OpenPGP key.

@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install shellcheck
-        run: sudo apt-get install -y shellcheck
+      - name: Install lint dependencies
+        run: sudo apt-get install -y jq shellcheck
 
       - name: bash -n syntax check (all .sh files)
         run: |
@@ -30,6 +30,9 @@ jobs:
           find . -name "*.sh" -not -path "./.git/*" | xargs shellcheck \
             --severity=warning \
             --exclude=SC2034,SC2148,SC1091
+
+      - name: Validate accepted device reports
+        run: bash ci/validate-device-results.sh
 
       - name: GitHub Actions workflow lint
         run: |
@@ -119,6 +122,7 @@ jobs:
           bash ci/proc_exe_test.sh
           bash ci/provider_args_test.sh
           bash ci/provider_archive_test.sh
+          bash ci/device_results_test.sh
 
       - name: Run integration test
         run: bash ci/integration_test.sh

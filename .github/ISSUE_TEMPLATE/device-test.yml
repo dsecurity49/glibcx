@@ -1,0 +1,57 @@
+name: Device test result
+description: Share an Android/Termux device-matrix result
+title: "[device test] Android "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing glibcx. Every result helps, including failures and devices already listed in the documentation.
+
+  - type: input
+    id: report_commit
+    attributes:
+      label: Tested commit
+      description: The 40-character commit printed in report.json.
+      placeholder: 0123456789abcdef0123456789abcdef01234567
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      placeholder: vivo V2541, Android 16 / API 36
+    validations:
+      required: true
+
+  - type: input
+    id: page_size
+    attributes:
+      label: Page size
+      description: The page_size value from report.json.
+      placeholder: "4096"
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Device report
+      description: Drag the glibcx-device-report tar.gz archive here after inspecting it.
+      placeholder: Attach the generated archive here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: If anything failed, say what happened and whether it happens consistently.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I inspected the archive and am comfortable sharing its contents publicly.
+          required: true

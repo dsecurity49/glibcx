@@ -1,86 +1,90 @@
-# Managed runtime build inputs
+# Building a managed runtime
 
-Production runtime assets must be built from the Android-patched
-`termux-pacman/glibc-packages` recipe for their final absolute prefix:
+This directory contains the scripts and pinned inputs used to build a glibcx
+runtime release.
+
+## Why the final path matters
+
+The runtime comes from the Android-patched
+`termux-pacman/glibc-packages` recipe. It is built directly for:
 
 ```text
 $PREFIX/opt/glibcx/runtimes/<profile-id>
 ```
 
-Copying an existing glibc tree to that path is not a production build because
-glibc embeds its prefix, loader path, system directories, and configuration
-paths. The release build must retain the upstream source archive, the exact
-glibc-packages commit and patches, compiler/toolchain provenance, licenses, and
-the corresponding-source bundle.
+glibc stores its prefix, loader location, system directories, and configuration
+paths at build time. Copying an existing glibc tree into that directory does not
+produce the same runtime.
 
-Each bundle root contains signed `profile.json`/`profile.json.asc` plus every
-file listed by the manifest. Regular file modes are restricted to `0644` and
-`0755`; all symlinks must remain inside the profile. The optional shim is built
-as a glibc DSO from `proc-exe-shim.c`, listed in `files`, and described by:
+`runtime-source.lock.json` pins the glibc recipe, Termux build framework, GNU
+glibc source archive, and source hash. Update those values deliberately for a
+new profile; do not build a release from a moving branch or container tag.
 
-```json
-{
-  "proc_exe_shim": {
-    "path": "/absolute/profile/lib/glibcx-proc-exe-shim.so",
-    "sha256": "...",
-    "auto_targets": [
-      {"basename": "tool", "sha256": "optional exact target hash"}
-    ]
-  }
-}
-```
+## What the build keeps
 
-The offline primary key ceremony is a maintainer action. CI may use only the
-dedicated release-signing subkey supplied by the protected release environment;
-it must never generate or retain the production primary key.
+The release artifact includes:
 
-`prepare-profile.sh` creates the unsigned, inventoried payload.
-`package-release.sh` consumes that payload plus its corresponding-source tree
-and assembles the complete immutable asset set. It requires an already
-provisioned signing key and full primary/signing fingerprints; it never creates
-or imports key material. The protected release workflow may call it only after
-the maintainer provisions the release-signing subkey.
+- the runtime payload and complete file inventory;
+- the exact upstream source archive and hash;
+- the pinned Termux and glibc-packages commits and patches;
+- the builder image digest and toolchain description;
+- applicable licenses; and
+- enough source and build material to reproduce the package.
 
-## Production workflow
+Regular files in a profile use mode `0644` or `0755`. Symlinks must resolve
+inside the profile. If the optional `/proc/self/exe` shim is present, it is built
+as a glibc DSO from `proc-exe-shim.c` and included in the signed inventory.
 
-`runtime-source.lock.json` pins the glibc-packages recipe, the Termux build
-framework, the GNU glibc source archive, and its digest. Review and increment
-those values explicitly when creating a new profile; never follow a moving
-branch during a release build.
+`prepare-profile.sh` inventories an unsigned payload. `package-release.sh`
+adds the corresponding-source bundle and creates the ten signed release assets.
+Neither script creates or imports production key material.
 
-After the candidate commit passes the device gates and has an annotated
-production tag, dispatch `.github/workflows/runtime-profile.yml`. Supply:
+## Key boundary
 
-- the existing production tag;
-- a new immutable profile ID;
+Create the primary release key offline by following
+[`keys/CEREMONY.md`](../keys/CEREMONY.md). GitHub receives only the encrypted
+release-signing subkey and its passphrase. The offline primary key and
+revocation certificate never enter CI.
+
+## Build the runtime
+
+After the candidate passes its pre-tag gates and an annotated production tag
+exists, dispatch `.github/workflows/runtime-profile.yml` with:
+
+- the production tag;
+- a new profile ID;
 - the tag timestamp as `source_date_epoch`; and
-- `ghcr.io/termux/package-builder-cgct` pinned by a full `sha256` digest.
+- `ghcr.io/termux/package-builder-cgct` pinned by a full SHA-256 digest.
 
-The workflow rebuilds the Android-patched recipe for the profile's final
-absolute prefix, downloads and verifies the corresponding GNU source, records
-both upstream commits and the builder-image digest, prepares the inventory, and
-uploads `glibcx-runtime-profile`. Never use a `latest` container reference.
+The workflow builds for the final prefix, verifies the GNU source archive,
+records its inputs, prepares the inventory, and uploads the
+`glibcx-runtime-profile` artifact.
 
-Then dispatch `.github/workflows/release.yml` with the successful profile-build
-run ID, its artifact name, a strictly increasing catalog version, and the same
-source timestamp. Leave `publish` false for the first run. The protected job:
+## Stage and publish the release
 
-1. verifies the annotated tag, exact checked-in version, public key, pinned
-   fingerprints, profile provenance, and source presence;
-2. imports only the encrypted release-signing subkey from the protected
-   environment;
-3. signs and independently verifies all ten assets;
-4. creates GitHub artifact attestations and a fully populated draft; and
-5. compares every uploaded asset digest with the locally verified bytes.
+Dispatch `.github/workflows/release.yml` with the successful profile-build run
+ID, artifact name, next catalog version, and the same source timestamp. Keep
+`publish` set to `false` on the first run.
 
-After reviewing the successful draft run, repeat with a new tag if any bytes
-must change. A run with `publish` true publishes the already verified draft,
-requires GitHub to report it immutable, and verifies the release attestation
-and every local asset against that attestation.
+The protected jobs then:
 
-The repository must define public variables
-`GLIBCX_RELEASE_PRIMARY_FINGERPRINT` and
-`GLIBCX_RELEASE_SIGNING_FINGERPRINT`. The `production-release` environment
-must define secrets
-`GLIBCX_RELEASE_SIGNING_SUBKEY_B64` and
-`GLIBCX_RELEASE_SIGNING_PASSPHRASE`. See `keys/CEREMONY.md`.
+1. check the tag, version, public key, fingerprints, source, and provenance;
+2. import the protected signing subkey;
+3. build, sign, and independently verify all ten assets;
+4. create attestations and upload a complete draft release; and
+5. compare the uploaded digests with the verified local files.
+
+Review that draft before dispatching the workflow with `publish` set to `true`.
+If any asset needs to change, make a new version and tag; do not replace an
+asset in place. Publication checks that GitHub locked the release and that every
+asset still matches its attestation.
+
+The repository variables are:
+
+- `GLIBCX_RELEASE_PRIMARY_FINGERPRINT`
+- `GLIBCX_RELEASE_SIGNING_FINGERPRINT`
+
+The `production-release` environment secrets are:
+
+- `GLIBCX_RELEASE_SIGNING_SUBKEY_B64`
+- `GLIBCX_RELEASE_SIGNING_PASSPHRASE`
