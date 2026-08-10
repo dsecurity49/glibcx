@@ -179,7 +179,7 @@ the latest release of each tool.
 | cargo-binstall 1.21.1 | GLIBC 2.17 | |
 | cargo-llvm-cov 0.8.7 | GLIBC 2.34 | |
 | xplr 1.1.0 | GLIBC 2.39 | |
-| hurl 8.0.1 | GLIBC 2.34 | Needs `libxml2.so.2`, `libicuuc.so.72`, and `libicudata.so.72` |
+| hurl 8.0.1 | GLIBC 2.34 | Needs `libxml2.so.2` and the transitive `libicuuc`/`libicudata` pair |
 
 ## Benchmark note
 
