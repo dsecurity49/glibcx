@@ -1,6 +1,8 @@
 cmd_setup() {
     echo "[glibcx] Initializing setup and prerequisites..."
     pkg update -y
+    pkg install glibc-repo -y
+    pkg update -y
     pkg install glibc-runner binutils file jq clang curl nodejs util-linux gnupg -y
 
     init_env

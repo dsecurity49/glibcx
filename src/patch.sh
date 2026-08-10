@@ -349,19 +349,23 @@ cmd_patch() {
     # --- 4. Compile C userland-exec wrapper ------------------------------------
     wrapper_c="${staging_dir}/wrapper.c"
     wrapper_bin="${staging_dir}/wrapper"
-    local target_c_bytes ldso_c_bytes library_path_c_bytes
+    local target_c_bytes ldso_c_bytes library_path_c_bytes ssl_cert_path_c_bytes
     local env_real_c_bytes env_wrapper_c_bytes env_app_c_bytes env_mode_c_bytes env_tunables_c_bytes
-    local trace_marker_c_bytes proc_exe_shim_c_bytes
+    local env_ssl_cert_c_bytes trace_marker_c_bytes proc_exe_shim_c_bytes
     target_c_bytes=$(_c_byte_array "$target_bin")
     ldso_c_bytes=$(_c_byte_array "$runtime_loader")
     library_path="$(state_current_lib_path "$app_id"):${profile_lib_path}"
     library_path_c_bytes=$(_c_byte_array "$library_path")
+    ssl_cert_path_c_bytes=$(_c_byte_array \
+        "${PREFIX:-/data/data/com.termux/files/usr}/etc/tls/cert.pem")
     env_real_c_bytes=$(_c_byte_array "GLIBCX_REAL_EXE=${target_bin}")
     env_wrapper_c_bytes=$(_c_byte_array "GLIBCX_WRAPPER_EXE=${final_wrapper}")
     env_app_c_bytes=$(_c_byte_array "GLIBCX_APP_ID=${app_id}")
     env_mode_c_bytes=$(_c_byte_array "GLIBCX_PROC_EXE_MODE=${proc_exe_mode}")
     env_tunables_c_bytes=$(_c_byte_array \
         "GLIBC_TUNABLES=$(jq -r '.allowed_tunables // [] | join(":")' <<<"$profile_json")")
+    env_ssl_cert_c_bytes=$(_c_byte_array \
+        "SSL_CERT_FILE=${PREFIX:-/data/data/com.termux/files/usr}/etc/tls/cert.pem")
     trace_marker_c_bytes=$(_c_byte_array "--glibcx-internal-trace=${app_id}")
     proc_exe_shim_c_bytes=$(_c_byte_array "$proc_exe_shim")
 
@@ -408,11 +412,13 @@ static int is_power_of_two(size_t value) {
 static const char target_bin[] = { ${target_c_bytes} };
 static const char ldso_path[] = { ${ldso_c_bytes} };
 static const char library_path[] = { ${library_path_c_bytes} };
+static const char ssl_cert_path[] = { ${ssl_cert_path_c_bytes} };
 static const char env_real_exe[] = { ${env_real_c_bytes} };
 static const char env_wrapper_exe[] = { ${env_wrapper_c_bytes} };
 static const char env_app_id[] = { ${env_app_c_bytes} };
 static const char env_proc_mode[] = { ${env_mode_c_bytes} };
 static const char env_tunables[] = { ${env_tunables_c_bytes} };
+static const char env_ssl_cert[] = { ${env_ssl_cert_c_bytes} };
 static const char trace_marker[] = { ${trace_marker_c_bytes} };
 static const char proc_exe_shim[] = { ${proc_exe_shim_c_bytes} };
 
@@ -646,7 +652,9 @@ int main(int argc, const char **argv, const char **envp) {
 
     size_t envp_a[MAX_ENV];
     size_t env_out = 0;
+    int has_ssl_cert_file = 0;
     for (size_t i = 0; i < envc; i++) {
+        if (has_env_name(envp[i], "SSL_CERT_FILE")) has_ssl_cert_file = 1;
         if (has_env_name(envp[i], "LD_PRELOAD") ||
             has_env_name(envp[i], "LD_LIBRARY_PATH") ||
             has_env_name(envp[i], "GLIBC_LD_LIBRARY_PATH") ||
@@ -666,6 +674,10 @@ int main(int argc, const char **argv, const char **envp) {
     for (size_t i = 0; i < sizeof(internal_env) / sizeof(internal_env[0]); i++) {
         if (env_out >= MAX_ENV) die("environment too large (limit 4096)");
         envp_a[env_out++] = PUSH_STR(internal_env[i]);
+    }
+    if (!has_ssl_cert_file && access(ssl_cert_path, R_OK) == 0) {
+        if (env_out >= MAX_ENV) die("environment too large (limit 4096)");
+        envp_a[env_out++] = PUSH_STR(env_ssl_cert);
     }
     if (trace_mode) {
         if (env_out >= MAX_ENV) die("environment too large (limit 4096)");

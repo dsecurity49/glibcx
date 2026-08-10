@@ -85,9 +85,15 @@ environment_output=$(HOME="${TEST_TMP_DIR}/home" \
     GLIBC_TUNABLES=glibc.malloc.check=3 \
     GLIBCX_APP_ID=caller-controlled \
     "${TEST_TMP_DIR}/home/.glibcx/bin/${first_id}" -c \
-    'printf "%s|%s|%s|%s|%s|%s" "${LD_PRELOAD-unset}" "${LD_LIBRARY_PATH-unset}" "${LD_AUDIT-unset}" "${LD_DEBUG-unset}" "${GLIBC_TUNABLES-unset}" "$GLIBCX_APP_ID"')
-[[ "$environment_output" == "unset|unset|unset|unset|glibc.malloc.check=0|${first_id}" ]] \
+    'printf "%s|%s|%s|%s|%s|%s|%s" "${LD_PRELOAD-unset}" "${LD_LIBRARY_PATH-unset}" "${LD_AUDIT-unset}" "${LD_DEBUG-unset}" "${GLIBC_TUNABLES-unset}" "${SSL_CERT_FILE-unset}" "$GLIBCX_APP_ID"')
+[[ "$environment_output" == "unset|unset|unset|unset|glibc.malloc.check=0|${PREFIX}/etc/tls/cert.pem|${first_id}" ]] \
     || fail "wrapper environment isolation failed: $environment_output"
+custom_cert_output=$(HOME="${TEST_TMP_DIR}/home" \
+    SSL_CERT_FILE=/custom/cert.pem \
+    "${TEST_TMP_DIR}/home/.glibcx/bin/${first_id}" \
+    -c 'printf "%s" "$SSL_CERT_FILE"')
+[[ "$custom_cert_output" == /custom/cert.pem ]] \
+    || fail "wrapper replaced caller-supplied SSL_CERT_FILE"
 run_environment_output=$(HOME="${TEST_TMP_DIR}/home" \
     LD_PRELOAD="${PREFIX}/lib/libtermux-exec-ld-preload.so" \
     LD_LIBRARY_PATH="${PREFIX}/lib" \

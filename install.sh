@@ -39,9 +39,18 @@ need curl
 need bash
 
 # ── install prerequisites ─────────────────────────────────────────────────────
+say "Refreshing the Termux package index..."
+pkg update -y || die "Could not refresh the Termux package index."
+
+say "Enabling the Termux glibc repository..."
+pkg install -y glibc-repo || die "Could not install glibc-repo."
+
+say "Refreshing package metadata with the glibc repository enabled..."
+pkg update -y || die "Could not refresh the glibc package index."
+
 say "Installing prerequisites via pkg..."
-pkg install -y glibc-runner binutils file jq clang curl nodejs util-linux gnupg 2>/dev/null || \
-    say "Some packages may already be installed — continuing."
+pkg install -y glibc-runner binutils file jq clang curl nodejs util-linux gnupg \
+    || die "Could not install glibcx prerequisites."
 
 need jq
 need gpg

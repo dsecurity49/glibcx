@@ -75,11 +75,13 @@ awk '/^#include <stdio\.h>/{found=1} found && /^C_CODE$/{exit} found{print}' src
       -e "s|\${patched_fp}|${FP}|g" \
       -e "s|\${ldso_c_bytes}|${LDSO_BYTES}|g" \
       -e "s|\${library_path_c_bytes}|${LIBRARY_PATH_BYTES}|g" \
+      -e 's|\${ssl_cert_path_c_bytes}|0x2f, 0x6e, 0x6f, 0x6e, 0x65, 0x00|g' \
       -e 's|\${env_real_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
       -e 's|\${env_wrapper_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
       -e 's|\${env_app_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
       -e 's|\${env_mode_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
       -e 's|\${env_tunables_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
+      -e 's|\${env_ssl_cert_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
       -e 's|\${trace_marker_c_bytes}|0x58, 0x3d, 0x31, 0x00|g' \
       -e 's|\${proc_exe_shim_c_bytes}|0x00|g' \
   > "$TEST_TMP_DIR/fd_wrapper.c"
