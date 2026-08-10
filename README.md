@@ -149,8 +149,12 @@ Dependency downloads use an isolated APT configuration and the pinned Termux
 glibc repository key. Offline mode uses only previously verified files and does
 not access the network.
 
-The production key has not been provisioned yet. Release-maintainer details are
-kept in [the key ceremony](keys/CEREMONY.md) and
+The production release key is published at
+[`keys/glibcx-release.gpg`](keys/glibcx-release.gpg). Its pinned primary
+fingerprint is `EB13 DBFA 9354 A552 85CF 4B03 B525 5ACD 0708 C45E`; the release
+signing subkey fingerprint is
+`2D0A D952 32D1 E58A D13E 6B23 C49A 0B44 BF9F 2613`. Release-maintainer details
+are in the [key ceremony](keys/CEREMONY.md) and
 [managed-runtime build guide](profiles/README.md).
 
 ## Reported compatibility

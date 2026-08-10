@@ -6,7 +6,7 @@ REPO="dsecurity49/glibcx"
 INSTALL_DIR="${HOME}/bin"
 BIN_NAME="glibcx"
 RELEASES_API="https://api.github.com/repos/${REPO}/releases/latest"
-RELEASE_PRIMARY_FINGERPRINT=""
+RELEASE_PRIMARY_FINGERPRINT="EB13DBFA9354A55285CF4B03B5255ACD0708C45E"
 KEY_INSTALL_DIR="${PREFIX:-/data/data/com.termux/files/usr}/share/glibcx/keys"
 
 FORCE=0

@@ -20,14 +20,13 @@ STATE_SCHEMA=3
 GLIBCX_VERSION="0.3.0-dev"
 PROFILE_COMPATIBILITY_SCHEMA=1
 
-# Release trust is intentionally incomplete until the maintainer performs the
-# offline production-key ceremony. The managed-profile client fails closed
-# while either value is absent; fixture tests override these shell variables
-# only after sourcing the modules.
+# Release trust is pinned to the public key produced by the offline production
+# ceremony. Fixture tests override these shell variables only after sourcing
+# the modules.
 RUNTIME_CATALOG_URL="https://github.com/dsecurity49/glibcx/releases/latest/download/glibcx-profiles-v1.json"
 RUNTIME_CATALOG_SIGNATURE_URL="${RUNTIME_CATALOG_URL}.asc"
 RUNTIME_RELEASE_KEYRING="${PREFIX:-/data/data/com.termux/files/usr}/share/glibcx/keys/glibcx-release.gpg"
-RUNTIME_RELEASE_PRIMARY_FINGERPRINT=""
+RUNTIME_RELEASE_PRIMARY_FINGERPRINT="EB13DBFA9354A55285CF4B03B5255ACD0708C45E"
 RUNTIME_TEST_ALLOW_LOCAL_ASSETS=false
 
 TERMUX_GLIBC_REPOSITORY="https://packages-cf.termux.dev/apt/termux-glibc"
