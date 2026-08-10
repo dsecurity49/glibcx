@@ -121,6 +121,7 @@ jobs:
           bash ci/repository_test.sh
           bash ci/proc_exe_test.sh
           bash ci/provider_args_test.sh
+          bash ci/provider_download_test.sh
           bash ci/provider_archive_test.sh
           bash ci/device_results_test.sh
 

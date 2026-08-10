@@ -4873,6 +4873,17 @@ _cleanup_fetch() {
     [[ -n "${_GLIBCX_FETCH_TMP_DIR:-}" ]] && rm -rf "${_GLIBCX_FETCH_TMP_DIR:?}"
 }
 
+_fetch_download() {
+    local url="$1" destination="$2"
+    curl -fSL \
+        --retry 5 \
+        --retry-all-errors \
+        --retry-delay 2 \
+        --retry-max-time 120 \
+        --progress-bar \
+        "$url" -o "$destination"
+}
+
 _fetch_archive_validate() {
     local archive_file="$1" archive_kind="$2" list_file verbose_file member normalized
     list_file=$(mktemp "${TMP_DIR}/provider-archive-list.XXXXXX")
@@ -4999,7 +5010,7 @@ cmd_fetch() {
     trap _cleanup_fetch EXIT
 
     echo "[glibcx] Downloading $url ..."
-    if ! curl -fSL --progress-bar "$url" -o "$tmp_dir/$filename"; then
+    if ! _fetch_download "$url" "$tmp_dir/$filename"; then
         echo "[glibcx] Error: Download failed for $url" >&2
         exit 1
     fi
