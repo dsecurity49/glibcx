@@ -40,6 +40,7 @@ while IFS= read -r -d '' report; do
             (.description | type == "string" and length > 0 and length <= 120)
             and (.status | IN("pass", "fail"))
             and (.exit_code | type == "number" and floor == . and . >= 0 and . <= 255)
+            and ((.status == "pass") == (.exit_code == 0))
             and (.log | test("^logs/[a-z0-9_-]+[.]log$"))
         )
         and ((.overall == "pass") == all(.tests[]; .status == "pass"))

@@ -5,8 +5,10 @@ set -euo pipefail
 
 repo="${GLIBCX_GITHUB_REPOSITORY:-dsecurity49/glibcx}"
 dry_run_tag="v0.3.0-dry-run.2"
-command -v gh >/dev/null 2>&1 \
-    || { echo "FAIL: GitHub CLI is required." >&2; exit 1; }
+for command_name in gh jq; do
+    command -v "$command_name" >/dev/null 2>&1 \
+        || { echo "FAIL: required command '$command_name' is unavailable." >&2; exit 1; }
+done
 
 immutable_json=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
     "repos/${repo}/immutable-releases") \

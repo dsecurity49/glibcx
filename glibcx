@@ -431,7 +431,11 @@ _state_migrate_v2_locked() {
         fi
         target_hash=${target_hash,,}
         basename=$(basename "$target_path")
-        app_id=$(_state_allocate_id_from_registry "$staged_registry" "$basename" "$target_hash" "$target_path")
+        if ! app_id=$(_state_allocate_id_from_registry "$staged_registry" "$basename" "$target_hash" "$target_path"); then
+            rm -f "$staged_registry"
+            rm -rf "${migration_root:?}"
+            return 1
+        fi
         staged_app="${migration_root}/${app_id}"
         staged_generation="${staged_app}/generations/1"
         final_app="${APPS_DIR}/${app_id}"
@@ -452,7 +456,11 @@ _state_migrate_v2_locked() {
         _state_migration_manifest \
             "${staged_generation}/manifest.json" "$app_id" "$target_path" "$target_hash" \
             "$legacy_json" "${final_app}/current/wrapper" "$migrated_wrapper_hash"
-        ln -s generations/1 "${staged_app}/current"
+        if ! ln -s generations/1 "${staged_app}/current"; then
+            rm -f "$staged_registry"
+            rm -rf "${migration_root:?}"
+            return 1
+        fi
 
         next_registry=$(mktemp "${CLI_STORAGE}/.registry.step.XXXXXX")
         manifest_path="${final_app}/current/manifest.json"
@@ -464,7 +472,11 @@ _state_migrate_v2_locked() {
             rm -rf "${migration_root:?}"
             return 1
         fi
-        mv -f "$next_registry" "$staged_registry"
+        if ! mv -f "$next_registry" "$staged_registry"; then
+            rm -f "$next_registry" "$staged_registry"
+            rm -rf "${migration_root:?}"
+            return 1
+        fi
     done < <(jq -r 'keys[]' "$REGISTRY_FILE")
 
     # Resolve every destination conflict before publishing the first app.
@@ -566,9 +578,17 @@ _state_upgrade_flat_v3_locked() {
             fi
             chmod 600 "${staged_generation}/manifest.json"
             mkdir -p "${app_root}/generations"
-            mv "$staged_generation" "$generation_dir"
+            if ! mv "$staged_generation" "$generation_dir"; then
+                rm -rf "${staged_generation:?}"
+                rm -f "$staged_registry"
+                return 1
+            fi
         fi
-        _state_atomic_symlink generations/1 "$current_link"
+        if ! _state_atomic_symlink generations/1 "$current_link"; then
+            echo "[glibcx] Error: failed to publish the current generation for '$app_id'." >&2
+            rm -f "$staged_registry"
+            return 1
+        fi
         if ! jq --arg path "$target_path" \
             --arg manifest "${app_root}/current/manifest.json" \
             '.apps[$path].manifest = $manifest' "$staged_registry" \
@@ -576,7 +596,10 @@ _state_upgrade_flat_v3_locked() {
             rm -f "${staged_registry}.next" "$staged_registry"
             return 1
         fi
-        mv "${staged_registry}.next" "$staged_registry"
+        if ! mv "${staged_registry}.next" "$staged_registry"; then
+            rm -f "${staged_registry}.next" "$staged_registry"
+            return 1
+        fi
     done < <(jq -r '.apps | keys[]' "$REGISTRY_FILE")
 
     if ! cmp -s "$staged_registry" "$REGISTRY_FILE"; then
@@ -2209,7 +2232,7 @@ cmd_runtime_install() {
         return 1
     }
     manifest_tmp="${stage_dir}/.manifest.json.tmp"
-    jq \
+    if ! jq \
         --arg signed_hash "$signed_hash" \
         --arg signer "$signer_fingerprint" \
         --argjson catalog_version "$catalog_version" \
@@ -2229,9 +2252,23 @@ cmd_runtime_install() {
             revoked: ($security_state == "revoked"),
             priority: $priority,
             installed_at: $installed_at
-        }' "${stage_dir}/profile.json" >"$manifest_tmp"
-    mv "$manifest_tmp" "${stage_dir}/manifest.json"
-    mv "$stage_dir" "$final_dir"
+        }' "${stage_dir}/profile.json" >"$manifest_tmp"; then
+        rm -f "$manifest_tmp"
+        rm -rf "${stage_dir:?}"
+        lock_release "$profile_lock"
+        return 1
+    fi
+    if ! mv "$manifest_tmp" "${stage_dir}/manifest.json"; then
+        rm -f "$manifest_tmp"
+        rm -rf "${stage_dir:?}"
+        lock_release "$profile_lock"
+        return 1
+    fi
+    if ! mv "$stage_dir" "$final_dir"; then
+        rm -rf "${stage_dir:?}"
+        lock_release "$profile_lock"
+        return 1
+    fi
     lock_release "$profile_lock"
     echo "[glibcx] Installed signed managed runtime '$profile_id' ($checked_count files)."
 }
@@ -2860,12 +2897,10 @@ _resolver_contents_provider() {
         {
             path=$1
             packages=$NF
-            canonical_lib="/glibc/lib/" wanted
-            canonical_usr_lib="/glibc/usr/lib/" wanted
-            exact_lib=(length(path) >= length(canonical_lib) &&
-                substr(path, length(path) - length(canonical_lib) + 1) == canonical_lib)
-            exact_usr_lib=(length(path) >= length(canonical_usr_lib) &&
-                substr(path, length(path) - length(canonical_usr_lib) + 1) == canonical_usr_lib)
+            canonical_lib="data/data/com.termux/files/usr/glibc/lib/" wanted
+            canonical_usr_lib="data/data/com.termux/files/usr/glibc/usr/lib/" wanted
+            exact_lib=(path == canonical_lib)
+            exact_usr_lib=(path == canonical_usr_lib)
             if (!exact_lib && !exact_usr_lib) next
             count=split(packages, names, ",")
             for (item_index=1; item_index<=count; item_index++) {
@@ -3078,26 +3113,44 @@ _resolver_copy_package_dso() {
         fi
     done
     final_source="${app_lib}/${chain_names[${#chain_names[@]}-1]}"
-    repository_json=$(cat "${snapshot_dir}/repository.json")
-    entry_json=$(jq -cn \
+    repository_json=$(cat "${snapshot_dir}/repository.json") || {
+        rm -rf "${extract_root:?}"
+        return 1
+    }
+    if ! entry_json=$(jq -cn \
         --arg soname "$soname" \
         --arg relative_path "lib/${soname}" \
         --arg file_hash "$(_sha256_file "$final_source")" \
         --argjson package "$package_json" \
         --argjson repository "$repository_json" \
         '{soname: $soname, relative_path: $relative_path, sha256: $file_hash,
-          package: $package, repository: $repository}')
+          package: $package, repository: $repository}'); then
+        rm -rf "${extract_root:?}"
+        return 1
+    fi
     provenance_file="$(dirname "$app_lib")/resolver-packages.json"
     provenance_tmp=$(mktemp "$(dirname "$app_lib")/.resolver-packages.XXXXXX")
     if [[ -f "$provenance_file" ]]; then
-        jq --argjson entry "$entry_json" \
+        if ! jq --argjson entry "$entry_json" \
             '.libraries = ((.libraries + [$entry]) | unique_by(.soname, .sha256))' \
-            "$provenance_file" >"$provenance_tmp"
+            "$provenance_file" >"$provenance_tmp"; then
+            rm -f "$provenance_tmp"
+            rm -rf "${extract_root:?}"
+            return 1
+        fi
     else
-        jq -n --argjson entry "$entry_json" --argjson repository "$repository_json" \
-            '{schema: 1, repository: $repository, libraries: [$entry]}' >"$provenance_tmp"
+        if ! jq -n --argjson entry "$entry_json" --argjson repository "$repository_json" \
+            '{schema: 1, repository: $repository, libraries: [$entry]}' >"$provenance_tmp"; then
+            rm -f "$provenance_tmp"
+            rm -rf "${extract_root:?}"
+            return 1
+        fi
     fi
-    mv "$provenance_tmp" "$provenance_file"
+    if ! mv "$provenance_tmp" "$provenance_file"; then
+        rm -f "$provenance_tmp"
+        rm -rf "${extract_root:?}"
+        return 1
+    fi
     rm -rf "${extract_root:?}"
 }
 
@@ -3456,7 +3509,7 @@ _c_byte_array() {
 
 cmd_patch() {
     local target_bin="" runtime_request="" no_verify=false dry_run=false
-    local offline=false refresh=false no_resolve=false proc_exe_mode=auto force=false verbose=false
+    local offline=false refresh=false no_resolve=false proc_exe_mode=auto verbose=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --runtime)
@@ -3464,13 +3517,16 @@ cmd_patch() {
                 runtime_request="$2"
                 shift 2
                 ;;
-            --runtime=*) runtime_request="${1#*=}"; shift ;;
+            --runtime=*)
+                runtime_request="${1#*=}"
+                [[ -n "$runtime_request" ]] || { echo "[glibcx] Error: --runtime requires a profile ID." >&2; exit 1; }
+                shift
+                ;;
             --no-verify) no_verify=true; shift ;;
             --dry-run) dry_run=true; shift ;;
             --offline) offline=true; shift ;;
             --refresh) refresh=true; shift ;;
             --no-resolve) no_resolve=true; shift ;;
-            --force) force=true; shift ;;
             --verbose) verbose=true; shift ;;
             --proc-exe=*)
                 proc_exe_mode="${1#*=}"
@@ -3516,9 +3572,6 @@ cmd_patch() {
     if [[ "$dry_run" == true && "$refresh" == true ]]; then
         echo "[glibcx] Error: --dry-run cannot refresh mutable repository state." >&2
         exit 1
-    fi
-    if [[ "$force" == true ]]; then
-        echo "[glibcx] Notice: --force permits republishing unchanged state; trust checks remain mandatory."
     fi
     if [[ -z "$runtime_request" && -f "$REGISTRY_FILE" ]] \
         && jq -e '.schema == 3 and (.apps | type) == "object"' "$REGISTRY_FILE" >/dev/null 2>&1; then
@@ -3598,7 +3651,8 @@ cmd_patch() {
     local have_glibc
     have_glibc=$(LC_ALL=C strings "$runtime_libc" 2>/dev/null \
         | LC_ALL=C grep -oE "GLIBC_[0-9]+\.[0-9]+" \
-        | LC_ALL=C sort -V | LC_ALL=C tail -n1 || echo "unknown")
+        | LC_ALL=C sort -V | LC_ALL=C tail -n1 || true)
+    [[ -n "$have_glibc" ]] || have_glibc=unknown
 
     if [[ "$verbose" == true ]]; then
         echo "[glibcx] GLIBC required/provided: $max_req_glibc / $have_glibc"
@@ -4502,8 +4556,11 @@ cmd_clean() {
             local bin_name
             bin_name="$(basename "$path")"
             echo "[glibcx] Removing stale entry: $path"
-            cmd_restore "$path"
-            stale=$((stale + 1))
+            if (cmd_restore "$path"); then
+                stale=$((stale + 1))
+            else
+                echo "[glibcx] Warning: could not remove stale entry: $path" >&2
+            fi
         fi
     done < <(json_list_paths)
     if [[ "$stale" -eq 0 ]]; then
@@ -4667,10 +4724,10 @@ cmd_doctor() {
             doctor_profile_kind=$(jq -r '.kind' <<<"$doctor_profile_json")
             doctor_loader=$(jq -r '.loader' <<<"$doctor_profile_json")
             doctor_profile_libs=$(jq -r '.library_dirs | join(":")' <<<"$doctor_profile_json")
-            doctor_tunables=$(jq -r '.allowed_tunables | join(":")' <<<"$doctor_profile_json")
+            doctor_tunables=$(jq -r '(.allowed_tunables // []) | join(":")' <<<"$doctor_profile_json")
         fi
         proc_exe_mode=$(jq -r '.wrapper.proc_exe_mode // "off"' "$manifest_path")
-        [[ "$proc_exe_mode" == on ]] \
+        [[ "$proc_exe_mode" == on && -n "$doctor_profile_json" ]] \
             && proc_exe_shim=$(jq -r '.proc_exe_shim.path // empty' <<<"$doctor_profile_json")
         recorded_loader_hash=$(jq -r '.runtime.loader_sha256 // empty' "$manifest_path")
         current_loader_hash=""
@@ -4715,7 +4772,7 @@ cmd_doctor() {
         if [[ -n "$doctor_profile_json" ]]; then
             doctor_loader=$(jq -r '.loader' <<<"$doctor_profile_json")
             doctor_profile_libs=$(jq -r '.library_dirs | join(":")' <<<"$doctor_profile_json")
-            doctor_tunables=$(jq -r '.allowed_tunables | join(":")' <<<"$doctor_profile_json")
+            doctor_tunables=$(jq -r '(.allowed_tunables // []) | join(":")' <<<"$doctor_profile_json")
         fi
     fi
 
@@ -4779,7 +4836,7 @@ cmd_doctor() {
     echo "  Loader        : $doctor_loader"
     echo "  Library path  : $library_path"
     echo "  Search note   : legacy RPATH may precede --library-path; --library-path precedes RUNPATH"
-    echo "  Managed trust : $(if [[ "$doctor_profile_kind" == managed ]]; then jq -r '.security_state + ", signed=" + (.signature_verified | tostring)' <<<"$doctor_profile_json"; else echo 'mutable development profile'; fi)"
+    echo "  Managed trust : $(if [[ "$doctor_profile_kind" == managed ]]; then jq -r '(.security_state // "unknown") + ", signed=" + ((.signature_verified // false) | tostring)' <<<"$doctor_profile_json"; else echo 'mutable development profile'; fi)"
 
     echo
     echo "State and drift"
@@ -4856,15 +4913,17 @@ cmd_trace_libs() {
         return 1
     fi
     log_file="${LOG_DIR}/trace-${app_id}-$(_timestamp_slug)-$$.log"
+    : >"$log_file"
+    chmod 600 "$log_file"
     echo "[glibcx] Executing target with glibc loader tracing enabled."
     echo "[glibcx] Trace log: $log_file"
     if "$wrapper_path" "--glibcx-internal-trace=${app_id}" "$@" \
-        2> >(tee "$log_file" >&2); then
+        2>"$log_file"; then
         exit_code=0
     else
         exit_code=$?
     fi
-    chmod 600 "$log_file"
+    cat "$log_file" >&2
     echo "[glibcx] Observed loader file records (observations only; lock unchanged):"
     local observed
     observed=$(LC_ALL=C sed -n 's/^.*file=\([^ ]*\).*$/  \1/p' "$log_file" \
@@ -5504,9 +5563,11 @@ console.log("sha512-" + crypto.createHash("sha512").update(fs.readFileSync(proce
 
     echo "[glibcx] Extracting package..."
     mkdir -p "$tmp_dir/ext"
-    _fetch_archive_validate "$tmp_dir/package.tgz" tar
-    tar -xzf "$tmp_dir/package.tgz" --no-same-owner --no-same-permissions -C "$tmp_dir/ext"
-    _fetch_tree_validate "$tmp_dir/ext"
+    if ! _fetch_archive_validate "$tmp_dir/package.tgz" tar \
+        || ! tar -xzf "$tmp_dir/package.tgz" --no-same-owner --no-same-permissions -C "$tmp_dir/ext" \
+        || ! _fetch_tree_validate "$tmp_dir/ext"; then
+        exit 1
+    fi
 
     local pkg_json="$tmp_dir/ext/package/package.json"
     if [[ ! -f "$pkg_json" ]]; then
@@ -5523,10 +5584,12 @@ console.log("sha512-" + crypto.createHash("sha512").update(fs.readFileSync(proce
 
     if [[ ! -s "$bin_paths_file" ]]; then
         echo "[glibcx] No 'bin' field. Searching for glibc ELF executables..."
-        find "$tmp_dir/ext/package" -type f -executable -exec env LC_ALL=C file {} \; 2>/dev/null \
-            | grep "ELF 64-bit" \
-            | awk -F: '{print $1}' \
-            | sed "s|$tmp_dir/ext/package/||" > "$bin_paths_file" || true
+        local candidate_path
+        while IFS= read -r candidate_path; do
+            if LC_ALL=C file "$candidate_path" 2>/dev/null | grep -q "ELF 64-bit"; then
+                printf '%s\n' "${candidate_path#"$tmp_dir/ext/package/"}"
+            fi
+        done < <(find "$tmp_dir/ext/package" -type f -executable 2>/dev/null) > "$bin_paths_file"
     fi
 
     if [[ ! -s "$bin_paths_file" ]]; then
@@ -5844,6 +5907,10 @@ cmd_vendor() {
         exit 1
     fi
     manifest_path=$(state_get_manifest_path "$target_bin")
+    if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+        echo "[glibcx] Error: registered manifest is missing for '$target_bin'. Re-patch it first." >&2
+        exit 1
+    fi
     app_root=$(state_app_root "$app_id")
     bin_name=$(basename "$target_bin")
     profile_id=$(jq -r '.runtime.profile_id' "$manifest_path")
@@ -5972,12 +6039,26 @@ cmd_vendor() {
         exit 1
     fi
 
-    mv "$manifest_tmp" "${stage_root}/manifest.json"
-    jq -r '.list.output' <<<"$verification_json" >"${stage_root}/resolution.txt"
+    if ! mv "$manifest_tmp" "${stage_root}/manifest.json" \
+        || ! jq -r '.list.output' <<<"$verification_json" >"${stage_root}/resolution.txt"; then
+        rm -f "$manifest_tmp"
+        rm -rf "${stage_root:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        exit 1
+    fi
     chmod 600 "${stage_root}/manifest.json" "${stage_root}/resolution.txt"
 
     generation_dir="${app_root}/generations/${generation_number}"
-    mv "$stage_root" "$generation_dir"
+    if ! mv "$stage_root" "$generation_dir"; then
+        rm -rf "${stage_root:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        echo "[glibcx] Error: failed to stage vendored app generation." >&2
+        exit 1
+    fi
     registry_snapshot=$(mktemp "${CLI_STORAGE}/.registry.rollback.XXXXXX")
     cp -p "$REGISTRY_FILE" "$registry_snapshot"
     if ! _state_atomic_symlink "generations/${generation_number}" "${app_root}/current" \
@@ -6180,8 +6261,6 @@ SUCCESS CRITERIA:
     glibcx benchmark         Download + patch 11 popular binaries not in Termux
     glibcx help              Show this help
 
-    glibcx fetch https://example.com/tool-linux-arm64.tar.gz --runtime system
-    glibcx intercept 'curl -fsSL https://bun.sh/install | bash' --runtime system
 EXAMPLES:
     glibcx runtime import-system
     glibcx npm install @anthropic-ai/claude-code --runtime system

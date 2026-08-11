@@ -34,6 +34,8 @@ else
     no_interpreter_target=$(find /lib /usr/lib -name ld-linux-aarch64.so.1 \
         -type f -print -quit 2>/dev/null)
 fi
+[[ -n "$no_interpreter_target" && -f "$no_interpreter_target" ]] \
+    || fail "no PT_INTERP fixture is unavailable"
 no_interpreter_inspection=$(elf_inspect "$no_interpreter_target")
 jq -e '
     .valid == false

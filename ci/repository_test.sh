@@ -101,6 +101,7 @@ printf '%s\n' \
 printf '%s\n' \
     'data/data/com.termux/files/usr/glibc/lib/libz.so.1 stable/zlib-fixture' \
     'data/data/com.termux/files/usr/glibc/lib/libz.so.1.3.2 stable/zlib-fixture' \
+    'compat/data/data/com.termux/files/usr/glibc/lib/libz.so.1 stable/compat-fixture' \
     'data/data/com.termux/files/usr/glibc/lib/libglibcx-guided.so.1 stable/zlib-fixture' \
     >"${distribution_root}/stable/Contents-aarch64"
 gzip -n -c "${distribution_root}/stable/Contents-aarch64" \

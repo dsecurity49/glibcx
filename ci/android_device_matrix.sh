@@ -91,9 +91,24 @@ replace_paths() {
             line = replace_all(line, home_path, "<HOME>")
             gsub(/gh[pousr]_[A-Za-z0-9_]+/, "<REDACTED_GITHUB_TOKEN>", line)
             gsub(/github_pat_[A-Za-z0-9_]+/, "<REDACTED_GITHUB_TOKEN>", line)
+            gsub(/([0-9][0-9]*[.]){3}[0-9][0-9]*/, "<REDACTED_IP>", line)
+            gsub(/u[0-9][0-9]*_a[0-9][0-9]*/, "<REDACTED_ANDROID_UID>", line)
+            gsub(/(UID|PID|uid|pid)[=:][[:space:]]*[0-9][0-9]*/, "<REDACTED_PROCESS_ID>", line)
+            gsub(/(serial|serialno|android_id|android-id|username|user)[=:][[:space:]]*[^[:space:]]+/, "<REDACTED_IDENTIFIER>", line)
+            gsub(/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "<REDACTED_PRIVATE_KEY>", line)
+            gsub(/ssh-(rsa|ed25519)[[:space:]]+[A-Za-z0-9+\/=]+/, "<REDACTED_SSH_KEY>", line)
             print line
         }
     '
+}
+
+assert_sanitized_logs() {
+    if LC_ALL=C grep -Eqi \
+        '/data/(data|user)/|TERMUX__UID|TERMUX_APP__PID|APK_FILE=|(^|[^A-Za-z])(gh[pousr]_|github_pat_)|u[0-9]+_a[0-9]+|-----BEGIN [A-Z ]*PRIVATE KEY-----|ssh-(rsa|ed25519)[[:space:]]+[A-Za-z0-9+/=]+' \
+        "${log_dir}"/*.log; then
+        echo '[device-test] Sanitization left a recognized private value in a report log.' >&2
+        exit 2
+    fi
 }
 
 tests_json='[]'
@@ -173,6 +188,7 @@ run_test state 'atomic state and wrapper' 15m bash ci/termux_state_smoke_test.sh
 run_test integration 'AArch64 integration' 15m bash ci/integration_test.sh
 run_test proc_exe 'proc-exe compatibility' 10m bash ci/proc_exe_test.sh
 run_test repository 'live repository contract' 15m bash ci/live_repository_probe.sh
+assert_sanitized_logs
 
 jq -n \
     --arg tested_at "$tested_at" \

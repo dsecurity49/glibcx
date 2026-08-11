@@ -76,10 +76,10 @@ cmd_doctor() {
             doctor_profile_kind=$(jq -r '.kind' <<<"$doctor_profile_json")
             doctor_loader=$(jq -r '.loader' <<<"$doctor_profile_json")
             doctor_profile_libs=$(jq -r '.library_dirs | join(":")' <<<"$doctor_profile_json")
-            doctor_tunables=$(jq -r '.allowed_tunables | join(":")' <<<"$doctor_profile_json")
+            doctor_tunables=$(jq -r '(.allowed_tunables // []) | join(":")' <<<"$doctor_profile_json")
         fi
         proc_exe_mode=$(jq -r '.wrapper.proc_exe_mode // "off"' "$manifest_path")
-        [[ "$proc_exe_mode" == on ]] \
+        [[ "$proc_exe_mode" == on && -n "$doctor_profile_json" ]] \
             && proc_exe_shim=$(jq -r '.proc_exe_shim.path // empty' <<<"$doctor_profile_json")
         recorded_loader_hash=$(jq -r '.runtime.loader_sha256 // empty' "$manifest_path")
         current_loader_hash=""
@@ -124,7 +124,7 @@ cmd_doctor() {
         if [[ -n "$doctor_profile_json" ]]; then
             doctor_loader=$(jq -r '.loader' <<<"$doctor_profile_json")
             doctor_profile_libs=$(jq -r '.library_dirs | join(":")' <<<"$doctor_profile_json")
-            doctor_tunables=$(jq -r '.allowed_tunables | join(":")' <<<"$doctor_profile_json")
+            doctor_tunables=$(jq -r '(.allowed_tunables // []) | join(":")' <<<"$doctor_profile_json")
         fi
     fi
 
@@ -188,7 +188,7 @@ cmd_doctor() {
     echo "  Loader        : $doctor_loader"
     echo "  Library path  : $library_path"
     echo "  Search note   : legacy RPATH may precede --library-path; --library-path precedes RUNPATH"
-    echo "  Managed trust : $(if [[ "$doctor_profile_kind" == managed ]]; then jq -r '.security_state + ", signed=" + (.signature_verified | tostring)' <<<"$doctor_profile_json"; else echo 'mutable development profile'; fi)"
+    echo "  Managed trust : $(if [[ "$doctor_profile_kind" == managed ]]; then jq -r '(.security_state // "unknown") + ", signed=" + ((.signature_verified // false) | tostring)' <<<"$doctor_profile_json"; else echo 'mutable development profile'; fi)"
 
     echo
     echo "State and drift"

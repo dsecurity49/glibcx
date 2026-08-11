@@ -72,4 +72,21 @@ if bash ci/validate-device-results.sh "$invalid_dir" >/dev/null 2>&1; then
 fi
 pass "inconsistent result rejection"
 
+jq '.tests[0].exit_code = 1' \
+    "${valid_dir}/android-36-vivo-v2541-4k.json" \
+    >"${invalid_dir}/pass-with-error.json"
+rm -f "${invalid_dir}/inconsistent-status.json"
+if bash ci/validate-device-results.sh "$invalid_dir" >/dev/null 2>&1; then
+    fail "passing status with non-zero exit code was accepted"
+fi
+
+jq '.tests[0].status = "fail"' \
+    "${valid_dir}/android-36-vivo-v2541-4k.json" \
+    >"${invalid_dir}/fail-with-success.json"
+rm -f "${invalid_dir}/pass-with-error.json"
+if bash ci/validate-device-results.sh "$invalid_dir" >/dev/null 2>&1; then
+    fail "failing status with zero exit code was accepted"
+fi
+pass "status and exit-code consistency rejection"
+
 printf '\nAll device-result tests passed.\n'

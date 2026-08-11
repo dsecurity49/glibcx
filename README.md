@@ -21,15 +21,29 @@ is available from the
 
 v0.3 is being tested now. The current `install.sh` expects the signed v0.3
 asset set and cannot install the older v0.2 files. Until v0.3 is tagged, use the
-source instructions below. Once the signed release exists, installation will
-be:
+source instructions below. The release instructions will use a versioned,
+signed installer asset rather than piping the mutable `main` branch to Bash.
+
+For a tagged release, download and verify the installer before executing it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dsecurity49/glibcx/main/install.sh | bash
+pkg install -y curl gnupg
+tag=v0.3.0
+base="https://github.com/dsecurity49/glibcx/releases/download/${tag}"
+curl -fLO "$base/glibcx-release.gpg"
+curl -fLO "$base/install.sh"
+curl -fLO "$base/install.sh.asc"
+expected_fingerprint=EB13DBFA9354A55285CF4B03B5255ACD0708C45E
+observed_fingerprint=$(LC_ALL=C gpg --batch --show-keys --with-colons glibcx-release.gpg \
+  | LC_ALL=C awk -F: '$1 == "fpr" {print toupper($10); exit}')
+test "$observed_fingerprint" = "$expected_fingerprint" \
+  && gpgv --keyring glibcx-release.gpg install.sh.asc install.sh \
+  && bash install.sh
 ```
 
-That installer verifies the OpenPGP signature and checksum, installs the
-required Termux packages, and places `glibcx` in `$HOME/bin`.
+Before trusting a release for the first time, compare the primary fingerprint
+shown below with the key you downloaded. Replace `v0.3.0` with the exact tag
+you intend to install; do not replace it with `main`.
 
 The immutable `v0.3.0-dry-run.2` release only proves the release workflow. It
 uses a fixture key and glibcx does not trust it.
@@ -82,6 +96,12 @@ For GitHub releases, glibcx prefers a native Android ARM64 asset. If one is not
 available, it looks for a Linux AArch64 glibc build and ignores musl builds,
 packages, checksums, and signatures. NPM tarballs are checked against the
 registry's SHA-512 integrity value before extraction.
+
+GitHub release assets are selected over HTTPS, but glibcx does not have an
+upstream signing key or trusted digest for every third-party project. Treat
+`glibcx gh install` as a convenience downloader, not as cryptographic
+verification of another project's release. Use an upstream verification method
+when that assurance matters.
 
 ## How it works
 

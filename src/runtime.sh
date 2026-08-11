@@ -1025,7 +1025,7 @@ cmd_runtime_install() {
         return 1
     }
     manifest_tmp="${stage_dir}/.manifest.json.tmp"
-    jq \
+    if ! jq \
         --arg signed_hash "$signed_hash" \
         --arg signer "$signer_fingerprint" \
         --argjson catalog_version "$catalog_version" \
@@ -1045,9 +1045,23 @@ cmd_runtime_install() {
             revoked: ($security_state == "revoked"),
             priority: $priority,
             installed_at: $installed_at
-        }' "${stage_dir}/profile.json" >"$manifest_tmp"
-    mv "$manifest_tmp" "${stage_dir}/manifest.json"
-    mv "$stage_dir" "$final_dir"
+        }' "${stage_dir}/profile.json" >"$manifest_tmp"; then
+        rm -f "$manifest_tmp"
+        rm -rf "${stage_dir:?}"
+        lock_release "$profile_lock"
+        return 1
+    fi
+    if ! mv "$manifest_tmp" "${stage_dir}/manifest.json"; then
+        rm -f "$manifest_tmp"
+        rm -rf "${stage_dir:?}"
+        lock_release "$profile_lock"
+        return 1
+    fi
+    if ! mv "$stage_dir" "$final_dir"; then
+        rm -rf "${stage_dir:?}"
+        lock_release "$profile_lock"
+        return 1
+    fi
     lock_release "$profile_lock"
     echo "[glibcx] Installed signed managed runtime '$profile_id' ($checked_count files)."
 }

@@ -95,6 +95,7 @@ fi
 host_bash=$(command -v bash)
 cat >"${TEST_TMP_DIR}/wrapper" <<WRAPPER
 #!${host_bash}
+printf '%s\n' invoked >"${TEST_TMP_DIR}/wrapper-invoked"
 exec env -u LD_PRELOAD "$loader" --preload "${TEST_TMP_DIR}/proc-exe-shim.so" \
     "${TEST_TMP_DIR}/fixture" "\$@"
 WRAPPER
@@ -110,6 +111,8 @@ output=$(env \
     "$loader" --preload "${TEST_TMP_DIR}/proc-exe-shim.so" \
     "${TEST_TMP_DIR}/fixture")
 [[ "$output" == child-ok ]] || fail "proc-exe self-reexec fixture returned '$output'"
+[[ "$(cat "${TEST_TMP_DIR}/wrapper-invoked")" == invoked ]] \
+    || fail "proc-exe self-reexec did not route through the wrapper"
 pass "read/open target view and wrapper-routed self-reexec"
 
 printf '\nAll proc-exe shim tests passed.\n'

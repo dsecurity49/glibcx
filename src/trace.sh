@@ -21,15 +21,17 @@ cmd_trace_libs() {
         return 1
     fi
     log_file="${LOG_DIR}/trace-${app_id}-$(_timestamp_slug)-$$.log"
+    : >"$log_file"
+    chmod 600 "$log_file"
     echo "[glibcx] Executing target with glibc loader tracing enabled."
     echo "[glibcx] Trace log: $log_file"
     if "$wrapper_path" "--glibcx-internal-trace=${app_id}" "$@" \
-        2> >(tee "$log_file" >&2); then
+        2>"$log_file"; then
         exit_code=0
     else
         exit_code=$?
     fi
-    chmod 600 "$log_file"
+    cat "$log_file" >&2
     echo "[glibcx] Observed loader file records (observations only; lock unchanged):"
     local observed
     observed=$(LC_ALL=C sed -n 's/^.*file=\([^ ]*\).*$/  \1/p' "$log_file" \

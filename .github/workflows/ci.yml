@@ -16,7 +16,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install lint dependencies
-        run: sudo apt-get install -y jq shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y jq shellcheck
 
       - name: bash -n syntax check (all .sh files)
         run: |
@@ -81,7 +83,7 @@ jobs:
           LC_ALL=C grep -Eq '[[:space:]]br[[:space:]]+x[0-9]+' /tmp/wrapper_main.dis
           if LC_ALL=C awk '
             /[[:space:]]br[[:space:]]+x[0-9]+/ {after_transfer=1; next}
-            after_transfer && /[[:space:]](ret|bl|blr)[[:space:]]/ {bad=1}
+            after_transfer && /[[:space:]](ret|bl|blr)([[:space:]]|$)/ {bad=1}
             END {exit bad}
           ' /tmp/wrapper_main.dis; then
             :

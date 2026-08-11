@@ -23,9 +23,10 @@ search order—identifies each missing SONAME. The resolver downloads that exact
 provider and repeats the probe until the loader reports a complete startup
 graph. Package and repository hashes are then recorded with the app generation.
 
-Contents lookup accepts only a DSO at a canonical top-level
-`.../glibc/lib/<SONAME>` or `.../glibc/usr/lib/<SONAME>`. This deliberately
-excludes compatibility payload copies such as
-`.../glibc/lib/box64-i386-linux-gnu/libz.so.1`; on 2026-08-09 that rule selected
-`zlib-glibc` instead of the unrelated `box64-glibc` copy. Multiple providers at
-the same canonical tier fail closed.
+Contents lookup accepts only
+`data/data/com.termux/files/usr/glibc/lib/<SONAME>` or
+`data/data/com.termux/files/usr/glibc/usr/lib/<SONAME>`. This deliberately
+excludes compatibility payload copies and prefixed lookalikes such as
+`compat/data/data/com.termux/files/usr/glibc/lib/libz.so.1`; on 2026-08-09 that
+rule selected `zlib-glibc` instead of the unrelated `box64-glibc` copy. Multiple
+providers at the same canonical tier fail closed.

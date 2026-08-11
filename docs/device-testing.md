@@ -48,9 +48,11 @@ and live repository probe, and creates a
 `glibcx-device-report-*.tar.gz` archive. It does not install glibcx globally or
 modify fixture binaries.
 
-The report replaces home, Termux-prefix, and repository paths in logs. It does
-not include device serial numbers, IP addresses, Android IDs, usernames, UIDs,
-PIDs, or SSH keys. You can inspect the archive before sharing it:
+The report redacts known home, Termux-prefix, repository paths, GitHub tokens,
+IPv4 addresses, Android UIDs, common identifiers, and private-key patterns.
+It refuses to create an archive if a recognized local path, token, Android UID,
+or private-key pattern remains. Inspect the archive before sharing it, especially
+if a command printed unusual environment or network details:
 
 ```bash
 tar -tzf glibcx-device-report-*.tar.gz

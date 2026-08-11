@@ -258,12 +258,10 @@ _resolver_contents_provider() {
         {
             path=$1
             packages=$NF
-            canonical_lib="/glibc/lib/" wanted
-            canonical_usr_lib="/glibc/usr/lib/" wanted
-            exact_lib=(length(path) >= length(canonical_lib) &&
-                substr(path, length(path) - length(canonical_lib) + 1) == canonical_lib)
-            exact_usr_lib=(length(path) >= length(canonical_usr_lib) &&
-                substr(path, length(path) - length(canonical_usr_lib) + 1) == canonical_usr_lib)
+            canonical_lib="data/data/com.termux/files/usr/glibc/lib/" wanted
+            canonical_usr_lib="data/data/com.termux/files/usr/glibc/usr/lib/" wanted
+            exact_lib=(path == canonical_lib)
+            exact_usr_lib=(path == canonical_usr_lib)
             if (!exact_lib && !exact_usr_lib) next
             count=split(packages, names, ",")
             for (item_index=1; item_index<=count; item_index++) {
@@ -476,26 +474,44 @@ _resolver_copy_package_dso() {
         fi
     done
     final_source="${app_lib}/${chain_names[${#chain_names[@]}-1]}"
-    repository_json=$(cat "${snapshot_dir}/repository.json")
-    entry_json=$(jq -cn \
+    repository_json=$(cat "${snapshot_dir}/repository.json") || {
+        rm -rf "${extract_root:?}"
+        return 1
+    }
+    if ! entry_json=$(jq -cn \
         --arg soname "$soname" \
         --arg relative_path "lib/${soname}" \
         --arg file_hash "$(_sha256_file "$final_source")" \
         --argjson package "$package_json" \
         --argjson repository "$repository_json" \
         '{soname: $soname, relative_path: $relative_path, sha256: $file_hash,
-          package: $package, repository: $repository}')
+          package: $package, repository: $repository}'); then
+        rm -rf "${extract_root:?}"
+        return 1
+    fi
     provenance_file="$(dirname "$app_lib")/resolver-packages.json"
     provenance_tmp=$(mktemp "$(dirname "$app_lib")/.resolver-packages.XXXXXX")
     if [[ -f "$provenance_file" ]]; then
-        jq --argjson entry "$entry_json" \
+        if ! jq --argjson entry "$entry_json" \
             '.libraries = ((.libraries + [$entry]) | unique_by(.soname, .sha256))' \
-            "$provenance_file" >"$provenance_tmp"
+            "$provenance_file" >"$provenance_tmp"; then
+            rm -f "$provenance_tmp"
+            rm -rf "${extract_root:?}"
+            return 1
+        fi
     else
-        jq -n --argjson entry "$entry_json" --argjson repository "$repository_json" \
-            '{schema: 1, repository: $repository, libraries: [$entry]}' >"$provenance_tmp"
+        if ! jq -n --argjson entry "$entry_json" --argjson repository "$repository_json" \
+            '{schema: 1, repository: $repository, libraries: [$entry]}' >"$provenance_tmp"; then
+            rm -f "$provenance_tmp"
+            rm -rf "${extract_root:?}"
+            return 1
+        fi
     fi
-    mv "$provenance_tmp" "$provenance_file"
+    if ! mv "$provenance_tmp" "$provenance_file"; then
+        rm -f "$provenance_tmp"
+        rm -rf "${extract_root:?}"
+        return 1
+    fi
     rm -rf "${extract_root:?}"
 }
 

@@ -25,6 +25,10 @@ cmd_vendor() {
         exit 1
     fi
     manifest_path=$(state_get_manifest_path "$target_bin")
+    if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+        echo "[glibcx] Error: registered manifest is missing for '$target_bin'. Re-patch it first." >&2
+        exit 1
+    fi
     app_root=$(state_app_root "$app_id")
     bin_name=$(basename "$target_bin")
     profile_id=$(jq -r '.runtime.profile_id' "$manifest_path")
@@ -153,12 +157,26 @@ cmd_vendor() {
         exit 1
     fi
 
-    mv "$manifest_tmp" "${stage_root}/manifest.json"
-    jq -r '.list.output' <<<"$verification_json" >"${stage_root}/resolution.txt"
+    if ! mv "$manifest_tmp" "${stage_root}/manifest.json" \
+        || ! jq -r '.list.output' <<<"$verification_json" >"${stage_root}/resolution.txt"; then
+        rm -f "$manifest_tmp"
+        rm -rf "${stage_root:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        exit 1
+    fi
     chmod 600 "${stage_root}/manifest.json" "${stage_root}/resolution.txt"
 
     generation_dir="${app_root}/generations/${generation_number}"
-    mv "$stage_root" "$generation_dir"
+    if ! mv "$stage_root" "$generation_dir"; then
+        rm -rf "${stage_root:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        echo "[glibcx] Error: failed to stage vendored app generation." >&2
+        exit 1
+    fi
     registry_snapshot=$(mktemp "${CLI_STORAGE}/.registry.rollback.XXXXXX")
     cp -p "$REGISTRY_FILE" "$registry_snapshot"
     if ! _state_atomic_symlink "generations/${generation_number}" "${app_root}/current" \

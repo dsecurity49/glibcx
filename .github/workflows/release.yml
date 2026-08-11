@@ -75,11 +75,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]]
           [[ "$CATALOG_VERSION" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]
-          [[ "$PRIMARY_FINGERPRINT" =~ ^[0-9A-Fa-f]{40,64}$ ]]
-          [[ "$SIGNING_FINGERPRINT" =~ ^[0-9A-Fa-f]{40,64}$ ]]
+          [[ "$PRIMARY_FINGERPRINT" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]]
+          [[ "$SIGNING_FINGERPRINT" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]]
           test "$(git cat-file -t "$TAG")" = tag
           commit=$(git rev-list -n 1 "$TAG")
           version=${TAG#v}

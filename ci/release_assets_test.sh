@@ -62,7 +62,7 @@ source_epoch=$(date -u '+%s')
 
 profile_id=release-fixture
 RUNTIME_ROOT="${TEST_TMP_DIR}/installed"
-final_prefix="${RUNTIME_ROOT}/${profile_id}"
+final_prefix="/data/data/com.termux/files/usr/opt/glibcx/runtimes/${profile_id}"
 payload_output="${TEST_TMP_DIR}/payload"
 env \
     GLIBC_VERSION=2.42 \
@@ -98,7 +98,7 @@ package_once "$assets"
 package_once "$second_assets"
 
 expected_assets=$(printf '%s\n' \
-    glibcx glibcx.asc glibcx.sha256 glibcx-release.gpg \
+    glibcx glibcx.asc glibcx.sha256 glibcx-release.gpg install.sh install.sh.asc \
     glibcx-profiles-v1.json glibcx-profiles-v1.json.asc \
     "glibcx-runtime-${profile_id}.tar.xz" \
     "glibcx-runtime-${profile_id}.tar.xz.asc" \
@@ -112,6 +112,7 @@ pass "complete binary, runtime, catalog, source, key, hash, and signature asset 
 
 for signed_name in \
     glibcx \
+    install.sh \
     glibcx-profiles-v1.json \
     "glibcx-runtime-${profile_id}.tar.xz" \
     "glibcx-runtime-${profile_id}-source.tar.xz"; do

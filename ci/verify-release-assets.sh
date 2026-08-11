@@ -15,8 +15,8 @@ EXPECTED_SIGNER="${4^^}"
 
 [[ -d "$ASSETS_DIR" ]] || usage
 [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || usage
-[[ "$EXPECTED_PRIMARY" =~ ^[0-9A-F]{40,64}$ \
-    && "$EXPECTED_SIGNER" =~ ^[0-9A-F]{40,64}$ ]] || usage
+[[ "$EXPECTED_PRIMARY" =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ \
+    && "$EXPECTED_SIGNER" =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ ]] || usage
 
 for command_name in gpg gpgv jq sha256sum tar xz; do
     command -v "$command_name" >/dev/null 2>&1 \
@@ -55,7 +55,7 @@ profile_id=$(jq -r '.profiles | if length == 1 then .[0].profile_id else empty e
 bundle_name="glibcx-runtime-${profile_id}.tar.xz"
 source_name="glibcx-runtime-${profile_id}-source.tar.xz"
 expected_assets=$(printf '%s\n' \
-    glibcx glibcx.asc glibcx.sha256 glibcx-release.gpg \
+    glibcx glibcx.asc glibcx.sha256 glibcx-release.gpg install.sh install.sh.asc \
     glibcx-profiles-v1.json glibcx-profiles-v1.json.asc \
     "$bundle_name" "${bundle_name}.asc" \
     "$source_name" "${source_name}.asc" | LC_ALL=C sort)
@@ -76,6 +76,7 @@ verify_signature() {
 }
 
 verify_signature "${ASSETS_DIR}/glibcx" "${ASSETS_DIR}/glibcx.asc"
+verify_signature "${ASSETS_DIR}/install.sh" "${ASSETS_DIR}/install.sh.asc"
 verify_signature "$catalog" "$catalog_signature"
 verify_signature "${ASSETS_DIR}/${bundle_name}" "${ASSETS_DIR}/${bundle_name}.asc"
 verify_signature "${ASSETS_DIR}/${source_name}" "${ASSETS_DIR}/${source_name}.asc"
@@ -117,7 +118,10 @@ manifest_hash=$(LC_ALL=C sha256sum "${verification_dir}/profile.json" | LC_ALL=C
 [[ "$manifest_hash" == "$(jq -r '.profiles[0].manifest_sha256' "$catalog")" ]] \
     || { echo "[verify-release] Error: inner profile manifest hash mismatch." >&2; exit 1; }
 profile_prefix=$(jq -r '.prefix' "${verification_dir}/profile.json")
-_runtime_profile_manifest_validate "${verification_dir}/profile.json" "$profile_id" "$profile_prefix"
+expected_prefix="/data/data/com.termux/files/usr/opt/glibcx/runtimes/${profile_id}"
+[[ "$profile_prefix" == "$expected_prefix" ]] \
+    || { echo "[verify-release] Error: runtime prefix does not match its profile ID." >&2; exit 1; }
+_runtime_profile_manifest_validate "${verification_dir}/profile.json" "$profile_id" "$expected_prefix"
 _runtime_apply_inventory_modes "$verification_dir" "${verification_dir}/profile.json"
 _runtime_inventory_verify "$verification_dir" "${verification_dir}/profile.json" >/dev/null
 

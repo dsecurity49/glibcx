@@ -46,8 +46,6 @@ SUCCESS CRITERIA:
     glibcx benchmark         Download + patch 11 popular binaries not in Termux
     glibcx help              Show this help
 
-    glibcx fetch https://example.com/tool-linux-arm64.tar.gz --runtime system
-    glibcx intercept 'curl -fsSL https://bun.sh/install | bash' --runtime system
 EXAMPLES:
     glibcx runtime import-system
     glibcx npm install @anthropic-ai/claude-code --runtime system

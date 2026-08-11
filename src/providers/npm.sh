@@ -116,9 +116,11 @@ console.log("sha512-" + crypto.createHash("sha512").update(fs.readFileSync(proce
 
     echo "[glibcx] Extracting package..."
     mkdir -p "$tmp_dir/ext"
-    _fetch_archive_validate "$tmp_dir/package.tgz" tar
-    tar -xzf "$tmp_dir/package.tgz" --no-same-owner --no-same-permissions -C "$tmp_dir/ext"
-    _fetch_tree_validate "$tmp_dir/ext"
+    if ! _fetch_archive_validate "$tmp_dir/package.tgz" tar \
+        || ! tar -xzf "$tmp_dir/package.tgz" --no-same-owner --no-same-permissions -C "$tmp_dir/ext" \
+        || ! _fetch_tree_validate "$tmp_dir/ext"; then
+        exit 1
+    fi
 
     local pkg_json="$tmp_dir/ext/package/package.json"
     if [[ ! -f "$pkg_json" ]]; then
@@ -135,10 +137,12 @@ console.log("sha512-" + crypto.createHash("sha512").update(fs.readFileSync(proce
 
     if [[ ! -s "$bin_paths_file" ]]; then
         echo "[glibcx] No 'bin' field. Searching for glibc ELF executables..."
-        find "$tmp_dir/ext/package" -type f -executable -exec env LC_ALL=C file {} \; 2>/dev/null \
-            | grep "ELF 64-bit" \
-            | awk -F: '{print $1}' \
-            | sed "s|$tmp_dir/ext/package/||" > "$bin_paths_file" || true
+        local candidate_path
+        while IFS= read -r candidate_path; do
+            if LC_ALL=C file "$candidate_path" 2>/dev/null | grep -q "ELF 64-bit"; then
+                printf '%s\n' "${candidate_path#"$tmp_dir/ext/package/"}"
+            fi
+        done < <(find "$tmp_dir/ext/package" -type f -executable 2>/dev/null) > "$bin_paths_file"
     fi
 
     if [[ ! -s "$bin_paths_file" ]]; then

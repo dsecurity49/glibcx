@@ -121,10 +121,10 @@ jq -n --arg first_path "$first_failed_target" --arg first_hash "$first_failed_ha
       ($path): {orig_hash: $hash, patched_fingerprint: "1_2_3_4_5"}}' \
     >"$REGISTRY_FILE"
 failed_registry_hash=$(_sha256_file "$REGISTRY_FILE")
-first_failed_id="alpha-${first_failed_hash:0:16}"
 failed_id="tool-${failed_hash:0:16}"
 mkdir -p "${APPS_DIR}/${failed_id}"
 printf 'conflicting-state\n' >"${APPS_DIR}/${failed_id}/manifest.json"
+preexisting_apps=$(find "$APPS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort)
 if init_env >/dev/null 2>&1; then
     fail "conflicting migration destination did not abort"
 fi
@@ -132,8 +132,9 @@ fi
     || fail "failed migration replaced the legacy registry"
 [[ "$(cat "$failed_target")" == legacy-target \
     && -f "${BIN_DIR}/tool" ]] || fail "failed migration changed legacy files"
-[[ ! -e "${APPS_DIR}/${first_failed_id}" ]] \
-    || fail "destination preflight left an earlier app partially published"
+[[ "$(find "$APPS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort)" \
+    == "$preexisting_apps" ]] \
+    || fail "destination preflight left an app partially published"
 if find "$APPS_DIR" -maxdepth 1 -name '.migration.*' -print -quit | grep -q .; then
     fail "failed migration left a partial staging directory"
 fi
@@ -188,15 +189,18 @@ alias_hash_one=$(_sha256_file "$alias_target_one")
 alias_hash_two=$(_sha256_file "$alias_target_two")
 alias_id_one="same-${alias_hash_one:0:16}"
 alias_id_two="same-${alias_hash_two:0:16}"
+lock_acquire registry_lock registry
 make_fake_app_locked "$alias_target_one" "$alias_hash_one" "$alias_id_one"
 make_fake_app_locked "$alias_target_two" "$alias_hash_two" "$alias_id_two"
 printf 'unmanaged\n' >"${BIN_DIR}/${alias_id_two}"
 if state_refresh_aliases_locked same false >/dev/null 2>&1; then
+    lock_release "$registry_lock"
     fail "alias refresh accepted an unmanaged app-ID conflict"
 fi
 [[ ! -e "${BIN_DIR}/${alias_id_one}" \
     && "$(cat "${BIN_DIR}/${alias_id_two}")" == unmanaged ]] \
     || fail "alias preflight left partial publication"
+lock_release "$registry_lock"
 pass "alias transaction preflight"
 
 # Different binaries with the same basename receive different app aliases and

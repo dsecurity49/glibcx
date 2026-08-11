@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# glibcx installer — runs as: curl -fsSL https://raw.githubusercontent.com/dsecurity49/glibcx/main/install.sh | bash
+# glibcx installer — verify this versioned release asset before executing it.
 set -euo pipefail
 
 REPO="dsecurity49/glibcx"
@@ -78,7 +78,7 @@ if [[ -z "$CHECKSUM_URL" || "$CHECKSUM_URL" == "null" \
     || -z "$KEY_URL" || "$KEY_URL" == "null" ]]; then
     die "Release is missing its mandatory checksum, signature, or public key asset."
 fi
-if [[ ! "$RELEASE_PRIMARY_FINGERPRINT" =~ ^[0-9A-Fa-f]{40,64}$ ]]; then
+if [[ ! "$RELEASE_PRIMARY_FINGERPRINT" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]]; then
     die "The production release-key fingerprint has not been provisioned in this installer."
 fi
 if [[ "$FORCE" -eq 1 ]]; then

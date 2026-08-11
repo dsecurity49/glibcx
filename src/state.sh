@@ -284,7 +284,11 @@ _state_migrate_v2_locked() {
         fi
         target_hash=${target_hash,,}
         basename=$(basename "$target_path")
-        app_id=$(_state_allocate_id_from_registry "$staged_registry" "$basename" "$target_hash" "$target_path")
+        if ! app_id=$(_state_allocate_id_from_registry "$staged_registry" "$basename" "$target_hash" "$target_path"); then
+            rm -f "$staged_registry"
+            rm -rf "${migration_root:?}"
+            return 1
+        fi
         staged_app="${migration_root}/${app_id}"
         staged_generation="${staged_app}/generations/1"
         final_app="${APPS_DIR}/${app_id}"
@@ -305,7 +309,11 @@ _state_migrate_v2_locked() {
         _state_migration_manifest \
             "${staged_generation}/manifest.json" "$app_id" "$target_path" "$target_hash" \
             "$legacy_json" "${final_app}/current/wrapper" "$migrated_wrapper_hash"
-        ln -s generations/1 "${staged_app}/current"
+        if ! ln -s generations/1 "${staged_app}/current"; then
+            rm -f "$staged_registry"
+            rm -rf "${migration_root:?}"
+            return 1
+        fi
 
         next_registry=$(mktemp "${CLI_STORAGE}/.registry.step.XXXXXX")
         manifest_path="${final_app}/current/manifest.json"
@@ -317,7 +325,11 @@ _state_migrate_v2_locked() {
             rm -rf "${migration_root:?}"
             return 1
         fi
-        mv -f "$next_registry" "$staged_registry"
+        if ! mv -f "$next_registry" "$staged_registry"; then
+            rm -f "$next_registry" "$staged_registry"
+            rm -rf "${migration_root:?}"
+            return 1
+        fi
     done < <(jq -r 'keys[]' "$REGISTRY_FILE")
 
     # Resolve every destination conflict before publishing the first app.
@@ -419,9 +431,17 @@ _state_upgrade_flat_v3_locked() {
             fi
             chmod 600 "${staged_generation}/manifest.json"
             mkdir -p "${app_root}/generations"
-            mv "$staged_generation" "$generation_dir"
+            if ! mv "$staged_generation" "$generation_dir"; then
+                rm -rf "${staged_generation:?}"
+                rm -f "$staged_registry"
+                return 1
+            fi
         fi
-        _state_atomic_symlink generations/1 "$current_link"
+        if ! _state_atomic_symlink generations/1 "$current_link"; then
+            echo "[glibcx] Error: failed to publish the current generation for '$app_id'." >&2
+            rm -f "$staged_registry"
+            return 1
+        fi
         if ! jq --arg path "$target_path" \
             --arg manifest "${app_root}/current/manifest.json" \
             '.apps[$path].manifest = $manifest' "$staged_registry" \
@@ -429,7 +449,10 @@ _state_upgrade_flat_v3_locked() {
             rm -f "${staged_registry}.next" "$staged_registry"
             return 1
         fi
-        mv "${staged_registry}.next" "$staged_registry"
+        if ! mv "${staged_registry}.next" "$staged_registry"; then
+            rm -f "${staged_registry}.next" "$staged_registry"
+            return 1
+        fi
     done < <(jq -r '.apps | keys[]' "$REGISTRY_FILE")
 
     if ! cmp -s "$staged_registry" "$REGISTRY_FILE"; then

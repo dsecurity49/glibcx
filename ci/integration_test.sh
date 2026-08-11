@@ -115,8 +115,8 @@ info "Running fd through the wrapper's internal trace channel"
 TRACE_OUT=$("$TEST_TMP_DIR/fd_wrapper" X=1 --version 2>&1 || true)
 echo "$TRACE_OUT" | grep -qE 'file=|find library=' \
   || fail "Internal trace channel did not enable loader diagnostics"
-echo "$TRACE_OUT" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+' \
-  || fail "Internal trace marker leaked into target arguments"
+echo "$TRACE_OUT" | grep -qE '^fd [0-9]+\.[0-9]+\.[0-9]+' \
+  || fail "fd --version output was missing from controlled trace run"
 pass "controlled LD_DEBUG trace enabled and marker stripped"
 
 # ── 8. Drift detection ────────────────────────────────────────────────────────

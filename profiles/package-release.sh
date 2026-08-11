@@ -34,6 +34,7 @@ SIGNING_KEY_FINGERPRINT=$(required_release_value SIGNING_KEY_FINGERPRINT)
 RELEASE_PRIMARY_FINGERPRINT=$(required_release_value RELEASE_PRIMARY_FINGERPRINT)
 SOURCE_DATE_EPOCH=$(required_release_value SOURCE_DATE_EPOCH)
 GLIBCX_BINARY="${GLIBCX_BINARY:-./glibcx}"
+INSTALLER_SCRIPT="${INSTALLER_SCRIPT:-./install.sh}"
 RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://github.com/dsecurity49/glibcx/releases/download/${RELEASE_TAG}}"
 PROFILE_SECURITY_STATE="${PROFILE_SECURITY_STATE:-recommended}"
 PROFILE_PRIORITY="${PROFILE_PRIORITY:-100}"
@@ -41,8 +42,8 @@ MIN_GLIBCX_VERSION="${MIN_GLIBCX_VERSION:-0.3.0}"
 
 SIGNING_KEY_FINGERPRINT=${SIGNING_KEY_FINGERPRINT^^}
 RELEASE_PRIMARY_FINGERPRINT=${RELEASE_PRIMARY_FINGERPRINT^^}
-[[ "$SIGNING_KEY_FINGERPRINT" =~ ^[0-9A-F]{40,64}$ \
-    && "$RELEASE_PRIMARY_FINGERPRINT" =~ ^[0-9A-F]{40,64}$ ]] \
+[[ "$SIGNING_KEY_FINGERPRINT" =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ \
+    && "$RELEASE_PRIMARY_FINGERPRINT" =~ ^([0-9A-F]{40}|[0-9A-F]{64})$ ]] \
     || { echo "[release] Error: signing fingerprints must be full hexadecimal fingerprints." >&2; exit 1; }
 [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] \
     || { echo "[release] Error: SOURCE_DATE_EPOCH must be a non-negative integer." >&2; exit 1; }
@@ -53,8 +54,8 @@ case "$PROFILE_SECURITY_STATE" in recommended|supported|deprecated) ;; *) usage 
     || { echo "[release] Error: MIN_GLIBCX_VERSION must be semantic version text." >&2; exit 1; }
 [[ "$RELEASE_BASE_URL" == "https://github.com/dsecurity49/glibcx/releases/download/${RELEASE_TAG}" ]] \
     || { echo "[release] Error: release asset URL must use the canonical version-tag URL." >&2; exit 1; }
-[[ -f "$GLIBCX_BINARY" && -f "${PAYLOAD_DIR}/profile.json" ]] \
-    || { echo "[release] Error: binary or prepared profile manifest is missing." >&2; exit 1; }
+[[ -f "$GLIBCX_BINARY" && -f "$INSTALLER_SCRIPT" && -f "${PAYLOAD_DIR}/profile.json" ]] \
+    || { echo "[release] Error: binary, installer, or prepared profile manifest is missing." >&2; exit 1; }
 
 for release_command in gpg jq tar xz sha256sum; do
     command -v "$release_command" >/dev/null 2>&1 \
@@ -88,8 +89,12 @@ mkdir -p "$output_parent"
 release_stage=$(mktemp -d "${output_parent}/.release-assets.XXXXXX")
 profile_stage=$(mktemp -d "${output_parent}/.profile-bundle.XXXXXX")
 cleanup() {
-    [[ -d "${release_stage:-}" ]] && rm -rf "${release_stage:?}"
-    [[ -d "${profile_stage:-}" ]] && rm -rf "${profile_stage:?}"
+    if [[ -d "${release_stage:-}" ]]; then
+        rm -rf "${release_stage:?}"
+    fi
+    if [[ -d "${profile_stage:-}" ]]; then
+        rm -rf "${profile_stage:?}"
+    fi
 }
 trap cleanup EXIT
 
@@ -129,9 +134,11 @@ sign_file "${release_stage}/${bundle_name}" "${release_stage}/${bundle_name}.asc
 sign_file "${release_stage}/${source_name}" "${release_stage}/${source_name}.asc"
 
 install -m 755 "$GLIBCX_BINARY" "${release_stage}/glibcx"
+install -m 755 "$INSTALLER_SCRIPT" "${release_stage}/install.sh"
 LC_ALL=C sha256sum "${release_stage}/glibcx" \
     | LC_ALL=C awk '{print $1 "  glibcx"}' >"${release_stage}/glibcx.sha256"
 sign_file "${release_stage}/glibcx" "${release_stage}/glibcx.asc"
+sign_file "${release_stage}/install.sh" "${release_stage}/install.sh.asc"
 LC_ALL=C gpg --batch --export "$RELEASE_PRIMARY_FINGERPRINT" \
     >"${release_stage}/glibcx-release.gpg"
 [[ -s "${release_stage}/glibcx-release.gpg" ]] \
@@ -192,6 +199,7 @@ sign_file "${release_stage}/${catalog_name}" "${release_stage}/${catalog_name}.a
 
 find "$release_stage" -type f -exec chmod 644 {} +
 chmod 755 "${release_stage}/glibcx"
+chmod 755 "${release_stage}/install.sh"
 mv "$release_stage" "${output_parent}/${output_name}"
 release_stage=""
 echo "[release] Signed versioned release assets: $OUTPUT_DIR"

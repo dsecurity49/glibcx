@@ -17,7 +17,7 @@ _c_byte_array() {
 
 cmd_patch() {
     local target_bin="" runtime_request="" no_verify=false dry_run=false
-    local offline=false refresh=false no_resolve=false proc_exe_mode=auto force=false verbose=false
+    local offline=false refresh=false no_resolve=false proc_exe_mode=auto verbose=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --runtime)
@@ -25,13 +25,16 @@ cmd_patch() {
                 runtime_request="$2"
                 shift 2
                 ;;
-            --runtime=*) runtime_request="${1#*=}"; shift ;;
+            --runtime=*)
+                runtime_request="${1#*=}"
+                [[ -n "$runtime_request" ]] || { echo "[glibcx] Error: --runtime requires a profile ID." >&2; exit 1; }
+                shift
+                ;;
             --no-verify) no_verify=true; shift ;;
             --dry-run) dry_run=true; shift ;;
             --offline) offline=true; shift ;;
             --refresh) refresh=true; shift ;;
             --no-resolve) no_resolve=true; shift ;;
-            --force) force=true; shift ;;
             --verbose) verbose=true; shift ;;
             --proc-exe=*)
                 proc_exe_mode="${1#*=}"
@@ -77,9 +80,6 @@ cmd_patch() {
     if [[ "$dry_run" == true && "$refresh" == true ]]; then
         echo "[glibcx] Error: --dry-run cannot refresh mutable repository state." >&2
         exit 1
-    fi
-    if [[ "$force" == true ]]; then
-        echo "[glibcx] Notice: --force permits republishing unchanged state; trust checks remain mandatory."
     fi
     if [[ -z "$runtime_request" && -f "$REGISTRY_FILE" ]] \
         && jq -e '.schema == 3 and (.apps | type) == "object"' "$REGISTRY_FILE" >/dev/null 2>&1; then
@@ -159,7 +159,8 @@ cmd_patch() {
     local have_glibc
     have_glibc=$(LC_ALL=C strings "$runtime_libc" 2>/dev/null \
         | LC_ALL=C grep -oE "GLIBC_[0-9]+\.[0-9]+" \
-        | LC_ALL=C sort -V | LC_ALL=C tail -n1 || echo "unknown")
+        | LC_ALL=C sort -V | LC_ALL=C tail -n1 || true)
+    [[ -n "$have_glibc" ]] || have_glibc=unknown
 
     if [[ "$verbose" == true ]]; then
         echo "[glibcx] GLIBC required/provided: $max_req_glibc / $have_glibc"
@@ -1063,8 +1064,11 @@ cmd_clean() {
             local bin_name
             bin_name="$(basename "$path")"
             echo "[glibcx] Removing stale entry: $path"
-            cmd_restore "$path"
-            stale=$((stale + 1))
+            if (cmd_restore "$path"); then
+                stale=$((stale + 1))
+            else
+                echo "[glibcx] Warning: could not remove stale entry: $path" >&2
+            fi
         fi
     done < <(json_list_paths)
     if [[ "$stale" -eq 0 ]]; then

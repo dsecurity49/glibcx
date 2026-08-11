@@ -7,15 +7,15 @@ fail() { printf '  FAIL %s\n' "$*" >&2; exit 1; }
 
 assert_bootstrap_order() {
     local file="$1" repo_line runner_line refresh_line
-    repo_line=$(LC_ALL=C grep -nE 'pkg install .*glibc-repo' "$file" \
+    repo_line=$(LC_ALL=C grep -nE '^[[:space:]]*pkg[[:space:]]+install([[:space:]]+-[^[:space:]]+)*[[:space:]].*\<glibc-repo\>' "$file" \
         | cut -d: -f1 | sed -n '1p')
-    runner_line=$(LC_ALL=C grep -nE 'pkg install .*glibc-runner' "$file" \
+    runner_line=$(LC_ALL=C grep -nE '^[[:space:]]*pkg[[:space:]]+install([[:space:]]+-[^[:space:]]+)*[[:space:]].*\<glibc-runner\>' "$file" \
         | cut -d: -f1 | sed -n '1p')
     [[ -n "$repo_line" && -n "$runner_line" && "$repo_line" -lt "$runner_line" ]] \
         || fail "$file does not install glibc-repo before glibc-runner"
 
     refresh_line=$(awk -v repo="$repo_line" -v runner="$runner_line" \
-        'NR > repo && NR < runner && /pkg update/ {print NR; exit}' "$file")
+        'NR > repo && NR < runner && /^[[:space:]]*pkg[[:space:]]+update([[:space:]]|$)/ {print NR; exit}' "$file")
     [[ -n "$refresh_line" ]] \
         || fail "$file does not refresh metadata after enabling glibc-repo"
     pass "$file enables and refreshes glibc-repo before glibc-runner"

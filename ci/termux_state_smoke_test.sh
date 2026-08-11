@@ -5,7 +5,8 @@ set -euo pipefail
 pass() { printf '  PASS %s\n' "$*"; }
 fail() { printf '  FAIL %s\n' "$*" >&2; exit 1; }
 
-TERMUX_GLIBC_BASH="${PREFIX:-/data/data/com.termux/files/usr}/glibc/bin/bash"
+termux_prefix="${PREFIX:-/data/data/com.termux/files/usr}"
+TERMUX_GLIBC_BASH="${termux_prefix}/glibc/bin/bash"
 GLIBCX_UNDER_TEST="${GLIBCX_UNDER_TEST:-./glibcx-bin}"
 [[ -x "$GLIBCX_UNDER_TEST" ]] || GLIBCX_UNDER_TEST=./glibcx
 if [[ ! -x "$TERMUX_GLIBC_BASH" ]]; then
@@ -77,8 +78,8 @@ HOME="${TEST_TMP_DIR}/home" "$GLIBCX_UNDER_TEST" rollback "$first_target" 2 \
 pass "retained generations support atomic rollback"
 
 environment_output=$(HOME="${TEST_TMP_DIR}/home" \
-    LD_PRELOAD="${PREFIX}/lib/libtermux-exec-ld-preload.so" \
-    LD_LIBRARY_PATH="${PREFIX}/lib" \
+    LD_PRELOAD="${termux_prefix}/lib/libtermux-exec-ld-preload.so" \
+    LD_LIBRARY_PATH="${termux_prefix}/lib" \
     LD_AUDIT=/does/not/exist.so \
     LD_DEBUG=all \
     LD_PROFILE=bad \
@@ -86,7 +87,7 @@ environment_output=$(HOME="${TEST_TMP_DIR}/home" \
     GLIBCX_APP_ID=caller-controlled \
     "${TEST_TMP_DIR}/home/.glibcx/bin/${first_id}" -c \
     'printf "%s|%s|%s|%s|%s|%s|%s" "${LD_PRELOAD-unset}" "${LD_LIBRARY_PATH-unset}" "${LD_AUDIT-unset}" "${LD_DEBUG-unset}" "${GLIBC_TUNABLES-unset}" "${SSL_CERT_FILE-unset}" "$GLIBCX_APP_ID"')
-[[ "$environment_output" == "unset|unset|unset|unset|glibc.malloc.check=0|${PREFIX}/etc/tls/cert.pem|${first_id}" ]] \
+[[ "$environment_output" == "unset|unset|unset|unset|glibc.malloc.check=0|${termux_prefix}/etc/tls/cert.pem|${first_id}" ]] \
     || fail "wrapper environment isolation failed: $environment_output"
 custom_cert_output=$(HOME="${TEST_TMP_DIR}/home" \
     SSL_CERT_FILE=/custom/cert.pem \
@@ -95,8 +96,8 @@ custom_cert_output=$(HOME="${TEST_TMP_DIR}/home" \
 [[ "$custom_cert_output" == /custom/cert.pem ]] \
     || fail "wrapper replaced caller-supplied SSL_CERT_FILE"
 run_environment_output=$(HOME="${TEST_TMP_DIR}/home" \
-    LD_PRELOAD="${PREFIX}/lib/libtermux-exec-ld-preload.so" \
-    LD_LIBRARY_PATH="${PREFIX}/lib" \
+    LD_PRELOAD="${termux_prefix}/lib/libtermux-exec-ld-preload.so" \
+    LD_LIBRARY_PATH="${termux_prefix}/lib" \
     "$GLIBCX_UNDER_TEST" run "$first_target" -- -c \
     'printf "%s|%s" "${LD_PRELOAD-unset}" "${LD_LIBRARY_PATH-unset}"')
 [[ "$run_environment_output" == "unset|unset" ]] \

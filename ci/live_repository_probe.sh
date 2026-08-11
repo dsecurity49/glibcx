@@ -40,11 +40,11 @@ init_env
 
 snapshot_dir=$(_resolver_repository_refresh) \
     || fail "authenticated repository refresh"
-jq -e '
+jq -e --arg pinned_fingerprint "$TERMUX_GLIBC_KEY_FINGERPRINT" '
     .origin == "termux-glibc glibc"
     and .suite == "glibc"
     and .architecture == "aarch64"
-    and (.signing_fingerprint | length) >= 40
+    and .signing_fingerprint == $pinned_fingerprint
 ' "${snapshot_dir}/repository.json" >/dev/null \
     || fail "authenticated repository identity metadata"
 grep -qE '^[^[:space:]]*glibc/(lib|usr/lib)/[^[:space:]]+[[:space:]]+[^[:space:]]+' \

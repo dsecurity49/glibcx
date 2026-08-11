@@ -40,8 +40,8 @@ schema 2 records its signed path, hash, protocol, reserved descriptor, and the
 runtime's glibc-hwcaps policy. Older or incomplete profiles fail validation.
 
 `prepare-profile.sh` inventories an unsigned payload. `package-release.sh`
-adds corresponding source and assembles the ten release assets; the binary,
-catalog, runtime bundle, and source bundle each receive detached signatures.
+adds corresponding source and assembles the twelve release assets; the binary,
+installer, catalog, runtime bundle, and source bundle each receive detached signatures.
 Neither script creates or imports real release key material.
 
 ## Keep the primary key offline
@@ -118,7 +118,7 @@ The protected jobs then:
 
 1. check the tag, version, public key, fingerprints, source, and provenance;
 2. import the protected signing subkey;
-3. build all ten assets, sign the four release payloads, and verify the
+3. build all twelve assets, sign the five release payloads, and verify the
    complete set independently;
 4. create attestations and upload a complete draft release; and
 5. compare the uploaded digests with the verified local files.

@@ -140,6 +140,10 @@ trap cleanup EXIT
 
 while IFS= read -r -d '' payload_file; do
     relative_path=${payload_file#"${PAYLOAD_DIR}/"}
+    if [[ "$relative_path" == *$'\t'* || "$relative_path" == *$'\n'* || "$relative_path" == *$'\r'* ]]; then
+        echo "[profile] Error: payload path contains a tab or line break: $relative_path" >&2
+        exit 1
+    fi
     file_hash=$(LC_ALL=C sha256sum "$payload_file" | LC_ALL=C awk '{print $1}')
     file_mode=$(LC_ALL=C stat -c '%a' "$payload_file")
     case "$file_mode" in 644|755) ;; *)
@@ -154,6 +158,10 @@ done < <(find "$PAYLOAD_DIR" -type f -print0 | LC_ALL=C sort -z)
 
 while IFS= read -r -d '' payload_link; do
     relative_path=${payload_link#"${PAYLOAD_DIR}/"}
+    if [[ "$relative_path" == *$'\t'* || "$relative_path" == *$'\n'* || "$relative_path" == *$'\r'* ]]; then
+        echo "[profile] Error: payload path contains a tab or line break: $relative_path" >&2
+        exit 1
+    fi
     link_target=$(readlink "$payload_link")
     if [[ "$link_target" == /* ]]; then
         echo "[profile] Error: symlink target must be relative: $relative_path" >&2

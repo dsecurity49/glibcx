@@ -113,4 +113,13 @@ if build_payload "${TEST_TMP_DIR}/unsafe-output" "$unsafe_tree" 2>/dev/null; the
 fi
 pass "unsafe symlink rejection"
 
+unsafe_name_tree="${TEST_TMP_DIR}/unsafe-name"
+cp -a "$prepared_tree" "$unsafe_name_tree"
+unsafe_tab_name=$'tab\tname'
+printf 'unsafe\n' >"${unsafe_name_tree}/lib/${unsafe_tab_name}"
+if build_payload "${TEST_TMP_DIR}/unsafe-name-output" "$unsafe_name_tree" 2>/dev/null; then
+    fail "tab-containing payload path was accepted"
+fi
+pass "tab-containing payload path rejection"
+
 printf '\nAll profile builder tests passed.\n'
