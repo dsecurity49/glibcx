@@ -33,8 +33,8 @@ command -v clang >/dev/null 2>&1 \
 
 clang --target=aarch64-linux-gnu --sysroot="$sysroot" \
     -shared -fPIC -nostdlib -O2 -Wall -Wextra -Werror \
-    "$source_file" -L"$(dirname "$libc_path")" \
-    -Wl,-soname,glibcx-proc-exe-shim.so -lc -o "$output_file"
+    "$source_file" "$libc_path" \
+    -Wl,-soname,glibcx-proc-exe-shim.so -o "$output_file"
 
 LC_ALL=C readelf -W -h "$output_file" | awk -F: '
     /Class:/{if ($2 !~ /ELF64/) bad=1}

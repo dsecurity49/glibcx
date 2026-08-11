@@ -20,6 +20,9 @@ if [[ "$(uname -o 2>/dev/null || true)" == Android ]]; then
     glibc_sysroot="${PREFIX:-/data/data/com.termux/files/usr}/glibc"
     [[ -f "${glibc_sysroot}/lib/Scrt1.o" && -f "${glibc_sysroot}/include/stdio.h" ]] \
         || fail "installed glibc development sysroot is incomplete"
+    glibc_libc=$(find -H "${glibc_sysroot}/lib" "${glibc_sysroot}/usr/lib" \
+        -name libc.so.6 -type f -print -quit 2>/dev/null) || true
+    [[ -n "$glibc_libc" ]] || fail "installed glibc development sysroot is missing libc.so.6"
 else
     glibc_sysroot=/
 fi
@@ -84,7 +87,7 @@ if [[ "$(uname -o 2>/dev/null || true)" == Android ]]; then
     clang --target=aarch64-linux-gnu --sysroot="$glibc_sysroot" \
         -nostdlib -fPIE -pie -O2 -Wall -Wextra -Werror \
         "${glibc_sysroot}/lib/Scrt1.o" "${glibc_sysroot}/lib/crti.o" \
-        "${TEST_TMP_DIR}/fixture.c" -L"${glibc_sysroot}/lib" -lc \
+        "${TEST_TMP_DIR}/fixture.c" "$glibc_libc" \
         "${glibc_sysroot}/lib/crtn.o" \
         -Wl,--dynamic-linker,"$loader" -o "${TEST_TMP_DIR}/fixture"
 else
