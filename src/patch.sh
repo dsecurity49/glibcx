@@ -293,7 +293,8 @@ cmd_patch() {
 
     local verification_json dependencies_json repository_json
     if ! repository_json=$(resolver_prepare_startup_closure "$profile_json" "$target_bin" \
-        "$inspection" "${staging_dir}/lib" "$offline" "$refresh" "$no_resolve"); then
+        "$inspection" "${staging_dir}/lib" "$offline" "$refresh" "$no_resolve" \
+        "$proc_exe_mode"); then
         rm -rf "${staging_dir:?}"
         lock_release "$app_lock"
         lock_release "$registry_lock"
@@ -349,13 +350,19 @@ cmd_patch() {
     # --- 4. Compile C userland-exec wrapper ------------------------------------
     wrapper_c="${staging_dir}/wrapper.c"
     wrapper_bin="${staging_dir}/wrapper"
-    local target_c_bytes ldso_c_bytes library_path_c_bytes ssl_cert_path_c_bytes
+    local target_c_bytes ldso_c_bytes library_path_c_bytes hwcaps_mask_c_bytes hwcaps_policy_c
+    local ssl_cert_path_c_bytes
     local env_real_c_bytes env_wrapper_c_bytes env_app_c_bytes env_mode_c_bytes env_tunables_c_bytes
     local env_ssl_cert_c_bytes trace_marker_c_bytes proc_exe_shim_c_bytes
     target_c_bytes=$(_c_byte_array "$target_bin")
     ldso_c_bytes=$(_c_byte_array "$runtime_loader")
     library_path="$(state_current_lib_path "$app_id"):${profile_lib_path}"
     library_path_c_bytes=$(_c_byte_array "$library_path")
+    hwcaps_mask_c_bytes=$(_c_byte_array \
+        "$(jq -r '.loader_policy.glibc_hwcaps_mask // empty' <<<"$profile_json")")
+    hwcaps_policy_c=0
+    jq -e '.loader_policy | has("glibc_hwcaps_mask")' <<<"$profile_json" >/dev/null 2>&1 \
+        && hwcaps_policy_c=1
     ssl_cert_path_c_bytes=$(_c_byte_array \
         "${PREFIX:-/data/data/com.termux/files/usr}/etc/tls/cert.pem")
     env_real_c_bytes=$(_c_byte_array "GLIBCX_REAL_EXE=${target_bin}")
@@ -412,6 +419,8 @@ static int is_power_of_two(size_t value) {
 static const char target_bin[] = { ${target_c_bytes} };
 static const char ldso_path[] = { ${ldso_c_bytes} };
 static const char library_path[] = { ${library_path_c_bytes} };
+static const char hwcaps_mask[] = { ${hwcaps_mask_c_bytes} };
+static const int use_hwcaps_policy = ${hwcaps_policy_c};
 static const char ssl_cert_path[] = { ${ssl_cert_path_c_bytes} };
 static const char env_real_exe[] = { ${env_real_c_bytes} };
 static const char env_wrapper_exe[] = { ${env_wrapper_c_bytes} };
@@ -625,7 +634,8 @@ int main(int argc, const char **argv, const char **envp) {
     size_t user_arg_start = trace_mode ? 2 : 1;
     size_t user_arg_count = (size_t)argc - user_arg_start;
     int use_proc_exe_shim = proc_exe_shim[0] != '\0';
-    size_t new_argc = 5 + (use_proc_exe_shim ? 2 : 0) + user_arg_count;
+    size_t new_argc = 5 + (use_hwcaps_policy ? 2 : 0) +
+        (use_proc_exe_shim ? 2 : 0) + user_arg_count;
 
     if (new_argc >= MAX_ARGS) {
         die("too many arguments (limit 4096)");
@@ -638,6 +648,10 @@ int main(int argc, const char **argv, const char **envp) {
     size_t argv_out = 0;
     argv_a[argv_out++] = PUSH_STR(ldso);
     argv_a[argv_out++] = PUSH_STR("--inhibit-cache");
+    if (use_hwcaps_policy) {
+        argv_a[argv_out++] = PUSH_STR("--glibc-hwcaps-mask");
+        argv_a[argv_out++] = PUSH_STR(hwcaps_mask);
+    }
     argv_a[argv_out++] = PUSH_STR("--library-path");
     argv_a[argv_out++] = PUSH_STR(library_path);
     if (use_proc_exe_shim) {

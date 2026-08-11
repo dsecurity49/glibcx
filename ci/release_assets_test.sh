@@ -33,6 +33,8 @@ else
 fi
 proc_shim="${TEST_TMP_DIR}/proc-exe-shim.so"
 bash profiles/build-proc-exe-shim.sh "$shim_sysroot" profiles/proc-exe-shim.c "$proc_shim"
+loader_audit="${TEST_TMP_DIR}/loader-audit.so"
+bash profiles/build-loader-audit.sh "$shim_sysroot" profiles/loader-audit.c "$loader_audit"
 
 prepared_tree="${TEST_TMP_DIR}/prepared"
 source_tree="${TEST_TMP_DIR}/corresponding-source"
@@ -71,6 +73,7 @@ env \
     CORRESPONDING_SOURCE_URL="https://github.com/dsecurity49/glibcx/releases/download/v0.3.0/glibcx-runtime-${profile_id}-source.tar.xz" \
     TOOLCHAIN_DESCRIPTION=ubuntu-26.04-arm-clang \
     PROC_SHIM_BINARY="$proc_shim" \
+    LOADER_AUDIT_BINARY="$loader_audit" \
     SOURCE_DATE_EPOCH="$source_epoch" \
     bash profiles/prepare-profile.sh \
         "$profile_id" "$prepared_tree" "$final_prefix" "$payload_output" >/dev/null

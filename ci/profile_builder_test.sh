@@ -36,6 +36,10 @@ proc_shim="${TEST_TMP_DIR}/proc-exe-shim.so"
 bash profiles/build-proc-exe-shim.sh \
     "$shim_sysroot" profiles/proc-exe-shim.c "$proc_shim" \
     || fail "proc-exe shim fixture build failed"
+loader_audit="${TEST_TMP_DIR}/loader-audit.so"
+bash profiles/build-loader-audit.sh \
+    "$shim_sysroot" profiles/loader-audit.c "$loader_audit" \
+    || fail "loader-audit fixture build failed"
 
 prepared_tree="${TEST_TMP_DIR}/prepared"
 mkdir -p "${prepared_tree}/lib" "${prepared_tree}/share/glibcx"
@@ -58,6 +62,7 @@ build_payload() {
         CORRESPONDING_SOURCE_URL=https://example.invalid/glibc-2.42-source.tar.xz \
         TOOLCHAIN_DESCRIPTION=ubuntu-26.04-arm-clang \
         PROC_SHIM_BINARY="$proc_shim" \
+        LOADER_AUDIT_BINARY="$loader_audit" \
         TERMUX_INSTALL_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}" \
         SOURCE_DATE_EPOCH=1767225600 \
         bash profiles/prepare-profile.sh \
@@ -82,6 +87,14 @@ jq -e '.proc_exe_shim.path
         | endswith("/lib/glibcx-proc-exe-shim.so")' \
     "${first_payload}/profile.json" >/dev/null \
     || fail "proc-exe shim was not recorded in the profile"
+[[ -f "${first_payload}/lib/glibcx-loader-audit.so" ]] \
+    || fail "loader-audit module was not included in the payload"
+jq -e '.compatibility_schema == 2
+        and .loader_audit.protocol == 1
+        and .loader_audit.fd == 198
+        and (.loader_audit.path | endswith("/lib/glibcx-loader-audit.so"))' \
+    "${first_payload}/profile.json" >/dev/null \
+    || fail "loader-audit policy was not recorded in the profile"
 pass "deterministic manifest and runtime-only payload"
 
 _runtime_profile_manifest_validate \

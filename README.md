@@ -2,55 +2,105 @@
 
 [![CI](https://github.com/dsecurity49/glibcx/actions/workflows/ci.yml/badge.svg)](https://github.com/dsecurity49/glibcx/actions/workflows/ci.yml)
 
-glibcx runs Linux AArch64 command-line tools inside Termux without a PRoot
-container. It is meant for tools that publish glibc builds but no native
-Android build.
+Termux can already do a lot. I kept finding useful command-line tools that
+published Linux AArch64 binaries but no Android build, even though the programs
+themselves worked fine with glibc.
+
+glibcx grew out of fixing that gap for Termux users. It runs those binaries
+directly in Termux without making everyone set up a full PRoot distribution.
 
 The original binary is never modified. glibcx builds a small AArch64 wrapper
 that loads the Termux glibc runtime in the same process and hands control to the
 target program.
 
-## Installation
+## Current state
+
+`v0.2.0` is the latest tagged version. It predates the v0.3 signing system and
+is available from the
+[GitHub release page](https://github.com/dsecurity49/glibcx/releases/tag/v0.2.0).
+
+v0.3 is being tested now. The current `install.sh` expects the signed v0.3
+asset set and cannot install the older v0.2 files. Until v0.3 is tagged, use the
+source instructions below. Once the signed release exists, installation will
+be:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dsecurity49/glibcx/main/install.sh | bash
 ```
 
-This installs the latest published release and the Termux packages it needs.
-`v0.2.0` is the current stable release. The v0.3 development branch will not
-install itself as a release until its production signing key and runtime assets
-have been published.
+That installer verifies the OpenPGP signature and checksum, installs the
+required Termux packages, and places `glibcx` in `$HOME/bin`.
+
+The immutable `v0.3.0-dry-run.2` release only proves the release workflow. It
+uses a fixture key and glibcx does not trust it.
+
+## Test v0.3 from source
+
+Enable the glibc repository before installing `glibc-runner`:
+
+```bash
+pkg update -y
+pkg install -y git clang jq curl file binutils nodejs util-linux gnupg \
+  xz-utils patchelf gzip glibc-repo
+pkg update -y
+pkg install -y glibc-runner
+
+git clone https://github.com/dsecurity49/glibcx.git
+cd glibcx
+./build.sh
+cmp -s glibcx glibcx-bin && echo 'Source build matches the checked-in executable.'
+```
+
+Use the checked-in `./glibcx` from the repository. Nothing is installed
+globally.
 
 ## Quick start
 
-During v0.3 development, import the glibc installation already provided by
-`glibc-runner`:
+From a v0.3 source checkout, import the glibc installation provided by
+`glibc-runner`, then select it explicitly:
 
 ```bash
-glibcx runtime import-system
-glibcx patch ./tool-linux-arm64 --runtime system
-glibcx run ./tool-linux-arm64 -- --help
+./glibcx runtime import-system
+./glibcx patch ./tool-linux-arm64 --runtime system
+./glibcx run ./tool-linux-arm64 -- --help
 ```
 
-The `system` runtime is a development and recovery option. Stable automatic
-installs will use signed managed runtimes instead of silently depending on a
-mutable system installation.
+The `system` runtime uses the local `glibc-runner` files and can change when its
+packages change. It is the right choice while testing from source. Signed v0.3
+runtimes will be inventoried and selected automatically.
 
 glibcx can also find binaries from common package sources:
 
 ```bash
-glibcx gh install sharkdp/fd --runtime system
-glibcx npm install @anthropic-ai/claude-code --runtime system
-glibcx fetch https://example.com/tool-linux-arm64.tar.gz --runtime system
-glibcx intercept 'curl -fsSL https://example.com/install.sh | bash' --runtime system
+./glibcx gh install sharkdp/fd --runtime system
+./glibcx npm install @anthropic-ai/claude-code --runtime system
+./glibcx fetch https://example.com/tool-linux-arm64.tar.gz --runtime system
+./glibcx intercept 'curl -fsSL https://example.com/install.sh | bash' --runtime system
 ```
 
-For GitHub releases, glibcx prefers a native Android ARM64 asset. If none is
-available, it looks for a Linux AArch64 glibc build and ignores musl, package,
-checksum, and signature files. NPM tarballs are checked against the registry's
-SHA-512 integrity value before extraction.
+For GitHub releases, glibcx prefers a native Android ARM64 asset. If one is not
+available, it looks for a Linux AArch64 glibc build and ignores musl builds,
+packages, checksums, and signatures. NPM tarballs are checked against the
+registry's SHA-512 integrity value before extraction.
 
-## Everyday commands
+## How it works
+
+`glibcx patch` inspects the ELF without running it, then asks the selected glibc
+loader to resolve its startup libraries. If a library is missing, glibcx can
+fetch the matching package from the authenticated Termux glibc repository and
+ask the loader again.
+
+With a signed managed runtime, glibcx records the files the loader actually
+opens, checks that they belong to the app or runtime, and stores their hashes
+and package sources in the dependency lock. CWD-dependent library paths are
+rejected because they could resolve differently the next time the tool runs.
+
+The wrapper and libraries are stored in a new generation under
+`~/.glibcx/apps/<app-id>/generations/`. Repatching switches one `current`
+symlink, which keeps the previous working generation available for rollback.
+The original target binary is never changed.
+
+## Useful commands
 
 ```bash
 glibcx list
@@ -78,7 +128,7 @@ glibcx self-update
 - `rollback` switches to a retained generation without rebuilding it.
 - `restore` removes glibcx state and aliases. The target itself was never
   replaced.
-- `clean --cache` shows what it will delete and asks for confirmation.
+- `clean --cache` previews cached data before asking for confirmation.
 
 Run `glibcx help` for the complete command and option list. Add `--verbose` to
 `patch` when you want the full ELF, symbol-version, and dependency audit.
@@ -86,24 +136,26 @@ Run `glibcx help` for the complete command and option list. Add `--verbose` to
 `--proc-exe=auto|on|off`. Proc-exe compatibility is automatic for recognized
 PyInstaller executables. Its shim comes from the verified managed runtime.
 
-The dependency lock covers libraries loaded by the ELF loader at startup. A
-program may load more libraries later through its own plugin or extraction
-logic; use `trace-libs` when that distinction matters.
+The lock covers startup libraries only. Plugins or libraries loaded later with
+`dlopen()` are observations, not automatically trusted additions; use
+`trace-libs` to investigate them.
 
-## What v0.3 changes
+## Troubleshooting
 
-- Each patched target gets its own app ID, so unrelated tools with the same
-  filename no longer share wrappers or libraries.
-- Repatching creates a new generation and changes one `current` symlink. An
-  interrupted repatch cannot expose half-written state.
-- Startup libraries are resolved from the signed Termux glibc repository,
-  checked, and recorded with the app.
-- Managed runtimes are verified with the glibcx release key before they become
-  active.
-- Both `glibcx run` and the native wrapper remove Android `LD_PRELOAD`,
-  loader paths, and other unsafe loader variables before glibc starts.
-- The launcher uses the device's actual page size and is designed for both
-  4 KB and 16 KB AArch64 systems.
+- If Termux cannot find `glibc-runner`, install `glibc-repo`, run `pkg update`,
+  and then install `glibc-runner` in a separate command.
+- If a registered target changed after updating itself, run
+  `glibcx upgrade <path>` to create a new generation.
+- If startup resolution fails, run `glibcx doctor <path>` first. Use
+  `glibcx deps <path> --refresh` only when you want to refresh authenticated
+  repository metadata.
+- `--offline` never downloads missing indexes, packages, profiles, or keys. A
+  clean offline cache can therefore fail even when online resolution works.
+- `libc.so.6: version 'LIBC' not found` usually means a Bionic preload reached
+  glibc. v0.3 scrubs Termux loader variables automatically; include the
+  `doctor` output and device report when reporting a recurrence.
+- For a self-inspecting executable, leave `--proc-exe=auto` enabled. Forcing it
+  off is useful for diagnosis but may break PyInstaller-style bundles.
 
 ## Limits
 
@@ -116,16 +168,19 @@ logic; use `trace-libs` when that distinction matters.
   provides will not run.
 - The wrapper remains `/proc/self/exe` by default. A signed runtime can provide
   a compatibility shim for known programs, but raw syscalls bypass that shim.
-- Android behavior varies by version, phone vendor, kernel, and Termux build.
+- Android behavior varies by version, device vendor, kernel, and Termux build.
   A successful report for one device is evidence, not a guarantee for every
   device.
 
-## Can you help test v0.3?
+## Termux community testing
 
-I only have access to a limited number of Android devices, so I’d appreciate
-results from other phones. Every report helps, including repeated Android
-versions and device models—vendors ship different kernels and security
-policies.
+I am building glibcx to make more software usable for the Termux community. I
+do not have a device lab, and Android behavior changes across vendors, kernels,
+versions, and page sizes. Real phones catch things ordinary Linux CI cannot.
+
+There is no unimportant report here. A different phone, another Android
+version, a 16 KB page-size device, a repeated pass, or a new failure all add to
+what the project actually knows.
 
 The device test builds the checked-out commit, runs the Android-relevant test
 suite, and creates a sanitized report:
@@ -134,27 +189,32 @@ suite, and creates a sanitized report:
 bash ci/android_device_matrix.sh
 ```
 
-If you have time to try it, attach the report to a device-test issue. Failed
-tests are useful too. The setup steps, privacy details, and reviewed results are
-in [the device-testing guide](docs/device-testing.md).
+If you want to add your device, the generated archive can be attached to a
+device-test issue. Setup, privacy details, and reviewed results are in the
+[device-testing guide](docs/device-testing.md).
 
-## Trust and release safety
+Device reports are only one way to contribute. Compatibility notes, bug
+reports, documentation fixes, repository research, and focused PRs all help.
+When a particular Linux AArch64 tool fails, `glibcx doctor <path>` is a useful
+starting point for an issue. If you also find the fix, linking the issue and PR
+keeps the investigation easy for everyone to follow.
 
-Releases and managed runtimes are checked against a pinned OpenPGP key.
-Checksums, GitHub attestations, and immutable releases provide additional
-evidence but do not replace that key. `--force` does not bypass signature or
-hash checks.
+## Verification
+
+Signed v0.3 releases and managed runtimes are checked against a pinned OpenPGP
+key. Checksums, GitHub attestations, and immutable releases add evidence but do
+not replace that key. `--force` does not bypass signature or hash checks.
 
 Dependency downloads use an isolated APT configuration and the pinned Termux
 glibc repository key. Offline mode uses only previously verified files and does
 not access the network.
 
-The production release key is published at
+The glibcx release key is published at
 [`keys/glibcx-release.gpg`](keys/glibcx-release.gpg). Its pinned primary
 fingerprint is `EB13 DBFA 9354 A552 85CF 4B03 B525 5ACD 0708 C45E`; the release
 signing subkey fingerprint is
-`2D0A D952 32D1 E58A D13E 6B23 C49A 0B44 BF9F 2613`. Release-maintainer details
-are in the [key ceremony](keys/CEREMONY.md) and
+`2D0A D952 32D1 E58A D13E 6B23 C49A 0B44 BF9F 2613`. Release details are in
+the [key ceremony](keys/CEREMONY.md) and
 [managed-runtime build guide](profiles/README.md).
 
 ## Reported compatibility
@@ -181,13 +241,12 @@ the latest release of each tool.
 | xplr 1.1.0 | GLIBC 2.39 | |
 | hurl 8.0.1 | GLIBC 2.34 | Needs `libxml2.so.2` and the transitive `libicuuc`/`libicudata` pair |
 
-## Benchmark note
+## Historical benchmark data
 
-On one Android 12 phone, v0.2 ran the tested `rg` and `fd` workloads close to
-native Termux speed. Starting the same commands through Debian PRoot was much
-slower in that setup. Results depend on the phone, filesystem, cache, tool
-versions, and workload, so run `glibcx benchmark` on the device that matters to
-you.
+These measurements came from one Android 12 phone running v0.2. They are kept
+as a reproducible reference, not as a general performance claim. Phone,
+filesystem, cache, tool version, and workload all change the result; use
+`glibcx benchmark` for a comparison on your own device.
 
 <details>
 <summary>Measured v0.2 results from that phone</summary>

@@ -113,6 +113,24 @@ if [[ -n "${PROC_SHIM_BINARY:-}" ]]; then
     chmod 755 "${PAYLOAD_DIR}/${PROC_SHIM_RELATIVE}"
 fi
 
+LOADER_AUDIT_BINARY=$(required_build_value LOADER_AUDIT_BINARY)
+[[ -f "$LOADER_AUDIT_BINARY" ]] \
+    || { echo "[profile] Error: LOADER_AUDIT_BINARY does not exist." >&2; exit 1; }
+if ! LC_ALL=C readelf -W -h "$LOADER_AUDIT_BINARY" 2>/dev/null \
+    | awk -F: '/Class:/{if ($2 !~ /ELF64/) bad=1}
+               /Machine:/{if ($2 !~ /AArch64/) bad=1; found=1}
+               END {exit bad || !found}'; then
+    echo "[profile] Error: loader-audit module is not an AArch64 ELF64 DSO." >&2
+    exit 1
+fi
+if LC_ALL=C readelf -W -d "$LOADER_AUDIT_BINARY" 2>/dev/null | grep -q '(NEEDED)'; then
+    echo "[profile] Error: loader-audit module must not have DT_NEEDED entries." >&2
+    exit 1
+fi
+LOADER_AUDIT_RELATIVE="lib/glibcx-loader-audit.so"
+cp -p "$LOADER_AUDIT_BINARY" "${PAYLOAD_DIR}/${LOADER_AUDIT_RELATIVE}"
+chmod 755 "${PAYLOAD_DIR}/${LOADER_AUDIT_RELATIVE}"
+
 records_file=$(mktemp)
 versions_file=$(mktemp)
 cleanup() { rm -f "${records_file:?}" "${versions_file:?}"; }
@@ -165,6 +183,11 @@ if [[ -n "$PROC_SHIM_RELATIVE" ]]; then
             | LC_ALL=C awk '{print $1}')" \
         '{path: $path, sha256: $hash, auto_targets: []}')
 fi
+loader_audit_json=$(jq -n \
+    --arg path "${FINAL_PREFIX}/${LOADER_AUDIT_RELATIVE}" \
+    --arg hash "$(LC_ALL=C sha256sum "${PAYLOAD_DIR}/${LOADER_AUDIT_RELATIVE}" \
+        | LC_ALL=C awk '{print $1}')" \
+    '{path: $path, sha256: $hash, protocol: 1, fd: 198}')
 
 jq -n \
     --arg id "$PROFILE_ID" \
@@ -185,9 +208,10 @@ jq -n \
     --argjson files "$files_json" \
     --argjson versions "$versions_json" \
     --argjson proc_shim "$proc_shim_json" \
+    --argjson loader_audit "$loader_audit_json" \
     '{
         schema: 1,
-        compatibility_schema: 1,
+        compatibility_schema: 2,
         profile_id: $id,
         kind: "managed",
         created_at: $created_at,
@@ -211,6 +235,8 @@ jq -n \
         },
         provided_versions: $versions,
         allowed_tunables: [],
+        loader_audit: $loader_audit,
+        loader_policy: {glibc_hwcaps_mask: ""},
         files: $files
     } + (if $proc_shim == null then {} else {proc_exe_shim: $proc_shim} end)' \
     >"${PAYLOAD_DIR}/profile.json"

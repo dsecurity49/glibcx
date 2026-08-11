@@ -31,7 +31,7 @@ elf_inspect() {
     local inspection_mode="${2:-target}"
     local header_text program_text dynamic_text notes_text versions_text
     local elf_class data_encoding elf_type machine interpreter_lines interpreter_count interpreter
-    local needed_lines soname rpath_lines runpath_lines dynamic_flags audit_tags
+    local needed_lines soname rpath_lines runpath_lines rpath_raw runpath_raw dynamic_flags audit_tags
     local build_id abi_note version_lines gnu_properties
     local gnu_stack_flags="" has_dynamic=false text_relocations=false wx_load=false
     local valid=true
@@ -99,8 +99,49 @@ elf_inspect() {
 
     needed_lines=$(_elf_dynamic_values "$dynamic_text" NEEDED)
     soname=$(_elf_dynamic_values "$dynamic_text" SONAME | sed -n '1p')
-    rpath_lines=$(_elf_dynamic_values "$dynamic_text" RPATH | tr ':' '\n')
-    runpath_lines=$(_elf_dynamic_values "$dynamic_text" RUNPATH | tr ':' '\n')
+    rpath_raw=$(_elf_dynamic_values "$dynamic_text" RPATH | sed -n '1p')
+    runpath_raw=$(_elf_dynamic_values "$dynamic_text" RUNPATH | sed -n '1p')
+    rpath_lines=$(tr ':' '\n' <<<"$rpath_raw")
+    runpath_lines=$(tr ':' '\n' <<<"$runpath_raw")
+    local declared_path expanded_path origin_path
+    origin_path=$(realpath -m "$(dirname "$elf_path")")
+    for declared_path in "$rpath_raw" "$runpath_raw"; do
+        [[ -n "$declared_path" ]] || continue
+        if [[ "$declared_path" == :* || "$declared_path" == *: || "$declared_path" == *::* ]]; then
+            errors+=("RPATH/RUNPATH contains an empty current-directory entry")
+            valid=false
+        fi
+    done
+    while IFS= read -r declared_path; do
+        [[ -n "$declared_path" ]] || continue
+        expanded_path=""
+        case "$declared_path" in
+            /*) ;;
+            '$ORIGIN'|'${ORIGIN}') ;;
+            '$ORIGIN/'*) expanded_path="${origin_path}/${declared_path#\$ORIGIN/}" ;;
+            '${ORIGIN}/'*) expanded_path="${origin_path}/${declared_path#\$\{ORIGIN\}/}" ;;
+            *)
+                errors+=("relative or unsupported RPATH/RUNPATH entry: $declared_path")
+                valid=false
+                continue
+                ;;
+        esac
+        if [[ -n "${expanded_path:-}" ]]; then
+            expanded_path=$(realpath -m "$expanded_path")
+            if [[ "$expanded_path" != "$origin_path" \
+                && "$expanded_path" != "${origin_path}/"* ]]; then
+                errors+=("ORIGIN RPATH/RUNPATH escapes the declaring object directory: $declared_path")
+                valid=false
+            fi
+            expanded_path=""
+        fi
+    done < <(printf '%s\n%s\n' "$rpath_lines" "$runpath_lines")
+    while IFS= read -r declared_path; do
+        if [[ "$declared_path" == */* ]]; then
+            errors+=("DT_NEEDED entry contains a path: $declared_path")
+            valid=false
+        fi
+    done <<<"$needed_lines"
     dynamic_flags=$(awk '/\((FLAGS|FLAGS_1)\)/ {sub(/^[[:space:]]*/, ""); print}' <<<"$dynamic_text")
     audit_tags=$(awk '/\((AUDIT|DEPAUDIT|FILTER|AUXILIARY)\)/ {sub(/^[[:space:]]*/, ""); print}' <<<"$dynamic_text")
     if grep -qE '\(TEXTREL\)|\(FLAGS\).*TEXTREL' <<<"$dynamic_text"; then

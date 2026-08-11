@@ -81,6 +81,29 @@ if command -v patchelf >/dev/null 2>&1; then
         and (.dynamic.runpath | length) == 0
     ' <<<"$rpath_inspection" >/dev/null || fail "legacy DT_RPATH was not distinguished"
     pass "RPATH and RUNPATH distinction"
+
+    for unsafe_rpath in 'libs' ':$ORIGIN' '$ORIGIN:' '$ORIGIN/../escape'; do
+        unsafe_target="${TEST_TMP_DIR}/unsafe-rpath-$(_sha256_text "$unsafe_rpath")"
+        cp "$glibc_target" "$unsafe_target"
+        patchelf --set-rpath "$unsafe_rpath" "$unsafe_target"
+        unsafe_inspection=$(elf_inspect "$unsafe_target")
+        jq -e '.valid == false
+            and any(.errors[];
+                contains("RPATH/RUNPATH") or contains("ORIGIN RPATH/RUNPATH escapes"))' \
+            <<<"$unsafe_inspection" >/dev/null \
+            || fail "unsafe RPATH/RUNPATH was accepted: $unsafe_rpath"
+    done
+    pass "CWD-dependent and escaping search-path rejection"
+
+    path_needed_target="${TEST_TMP_DIR}/path-needed-target"
+    cp "$glibc_target" "$path_needed_target"
+    patchelf --add-needed '../libglibcx-escape.so' "$path_needed_target"
+    path_needed_inspection=$(elf_inspect "$path_needed_target")
+    jq -e '.valid == false
+        and any(.errors[]; contains("DT_NEEDED entry contains a path"))' \
+        <<<"$path_needed_inspection" >/dev/null \
+        || fail "path-bearing DT_NEEDED entry was accepted"
+    pass "path-bearing DT_NEEDED rejection"
 else
     echo "  SKIP RPATH/RUNPATH fixture (patchelf unavailable)"
 fi

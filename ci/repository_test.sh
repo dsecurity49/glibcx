@@ -59,12 +59,12 @@ bundled_origin="${TEST_TMP_DIR}/bundled-app"
 mkdir -p "$bundled_origin" "${TEST_TMP_DIR}/empty-app-lib"
 cp "$source_dso" "${bundled_origin}/libz.so.1"
 bundled_profile='{"library_dirs":[]}'
-bundled_inspection='{"dynamic":{"rpath":[],"runpath":[]}}'
+bundled_inspection='{"dynamic":{"rpath":[],"runpath":["$ORIGIN"]}}'
 bundled_resolution=$(_resolver_find_library libz.so.1 \
     "${TEST_TMP_DIR}/empty-app-lib" "$bundled_profile" "$bundled_origin" "$bundled_inspection")
 [[ "$bundled_resolution" == "${bundled_origin}/libz.so.1" ]] \
     || fail "same-directory bundled DSO was not preferred"
-pass "same-directory bundled DSO resolution"
+pass "explicit ORIGIN bundled DSO resolution"
 
 repository_root="${TEST_TMP_DIR}/repo"
 package_root="${TEST_TMP_DIR}/package-root"
@@ -82,6 +82,8 @@ printf '%s\n' \
     'Description: signed repository fixture' >"${package_root}/DEBIAN/control"
 cp "$source_dso" "${package_root}/data/data/com.termux/files/usr/glibc/lib/libz.so.1.3.2"
 ln -s libz.so.1.3.2 "${package_root}/data/data/com.termux/files/usr/glibc/lib/libz.so.1"
+cp "$source_dso" \
+    "${package_root}/data/data/com.termux/files/usr/glibc/lib/libglibcx-guided.so.1"
 package_file="${package_pool}/zlib-fixture_1.0-1_aarch64.deb"
 dpkg-deb --build "$package_root" "$package_file" >/dev/null
 package_hash=$(_sha256_file "$package_file")
@@ -99,6 +101,7 @@ printf '%s\n' \
 printf '%s\n' \
     'data/data/com.termux/files/usr/glibc/lib/libz.so.1 stable/zlib-fixture' \
     'data/data/com.termux/files/usr/glibc/lib/libz.so.1.3.2 stable/zlib-fixture' \
+    'data/data/com.termux/files/usr/glibc/lib/libglibcx-guided.so.1 stable/zlib-fixture' \
     >"${distribution_root}/stable/Contents-aarch64"
 gzip -n -c "${distribution_root}/stable/Contents-aarch64" \
     >"${distribution_root}/stable/Contents-aarch64.gz"
@@ -148,6 +151,48 @@ resolved_package=$(_resolver_download_package "$package_json" false)
 offline_package=$(_resolver_download_package "$package_json" true)
 [[ "$offline_package" == "$resolved_package" ]] \
     || fail "offline package reuse did not select the content-addressed cache"
+
+if [[ -x "${PREFIX:-/nonexistent}/glibc/lib/ld-linux-aarch64.so.1" ]]; then
+    fixture_loader="${PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
+    fixture_libc="${PREFIX}/glibc/lib/libc.so.6"
+    fixture_target="${PREFIX}/glibc/bin/true"
+    fixture_sysroot="${PREFIX}/glibc"
+else
+    fixture_loader=$(find /lib /usr/lib -name ld-linux-aarch64.so.1 -type f -print -quit 2>/dev/null)
+    fixture_libc=$(find /lib /usr/lib -name libc.so.6 -type f -print -quit 2>/dev/null)
+    fixture_target=/bin/true
+    fixture_sysroot=/
+fi
+loader_profile_lib="${TEST_TMP_DIR}/loader-profile/lib"
+loader_audit="${TEST_TMP_DIR}/loader-profile/loader-audit.so"
+guided_target="${TEST_TMP_DIR}/loader-guided-target"
+guided_app_lib="${TEST_TMP_DIR}/loader-guided-app/lib"
+mkdir -p "$loader_profile_lib" "$guided_app_lib"
+cp "$fixture_libc" "${loader_profile_lib}/libc.so.6"
+cp "$fixture_target" "$guided_target"
+patchelf --add-needed libglibcx-guided.so.1 "$guided_target"
+bash profiles/build-loader-audit.sh \
+    "$fixture_sysroot" profiles/loader-audit.c "$loader_audit"
+guided_profile=$(jq -n \
+    --arg loader "$fixture_loader" --arg lib "$loader_profile_lib" \
+    --arg loader_lib "$(dirname "$fixture_loader")" --arg audit "$loader_audit" '{
+        profile_id: "guided-fixture", kind: "system", loader: $loader,
+        library_dirs: [$lib, $loader_lib], allowed_tunables: [],
+        loader_audit: {path: $audit, protocol: 1, fd: 198},
+        loader_policy: {glibc_hwcaps_mask: ""}
+    }')
+guided_repository=$(resolver_prepare_startup_closure "$guided_profile" "$guided_target" \
+    "$(elf_inspect "$guided_target")" "$guided_app_lib" false false false off)
+guided_verification=$(loader_verify_target "$guided_profile" "$guided_app_lib" "$guided_app_lib" \
+    "$guided_target" "$(elf_inspect "$guided_target")")
+jq -e '.verified == true
+    and any(.audit.opened[]; .path | endswith("/libglibcx-guided.so.1"))' \
+    <<<"$guided_verification" >/dev/null \
+    || fail "loader-guided resolution did not produce a verified closure"
+jq -e '.inrelease_sha256 | test("^[0-9a-f]{64}$")' <<<"$guided_repository" >/dev/null \
+    || fail "loader-guided resolution did not return repository provenance"
+pass "iterative loader-guided missing-SONAME resolution"
+
 mkdir -p "${TEST_TMP_DIR}/app/lib"
 _resolver_copy_package_dso "$resolved_package" libz.so.1 "${TEST_TMP_DIR}/app/lib" \
     "$package_json" "$snapshot_dir"

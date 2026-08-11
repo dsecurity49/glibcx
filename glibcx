@@ -18,7 +18,7 @@ PROFILE_STATE_DIR="${CLI_STORAGE}/profiles"
 RUNTIME_ROOT="${PREFIX:-/data/data/com.termux/files/usr}/opt/glibcx/runtimes"
 STATE_SCHEMA=3
 GLIBCX_VERSION="0.3.0-dev"
-PROFILE_COMPATIBILITY_SCHEMA=1
+PROFILE_COMPATIBILITY_SCHEMA=2
 
 # Release trust is pinned to the public key produced by the offline production
 # ceremony. Fixture tests override these shell variables only after sourcing
@@ -938,7 +938,7 @@ elf_inspect() {
     local inspection_mode="${2:-target}"
     local header_text program_text dynamic_text notes_text versions_text
     local elf_class data_encoding elf_type machine interpreter_lines interpreter_count interpreter
-    local needed_lines soname rpath_lines runpath_lines dynamic_flags audit_tags
+    local needed_lines soname rpath_lines runpath_lines rpath_raw runpath_raw dynamic_flags audit_tags
     local build_id abi_note version_lines gnu_properties
     local gnu_stack_flags="" has_dynamic=false text_relocations=false wx_load=false
     local valid=true
@@ -1006,8 +1006,49 @@ elf_inspect() {
 
     needed_lines=$(_elf_dynamic_values "$dynamic_text" NEEDED)
     soname=$(_elf_dynamic_values "$dynamic_text" SONAME | sed -n '1p')
-    rpath_lines=$(_elf_dynamic_values "$dynamic_text" RPATH | tr ':' '\n')
-    runpath_lines=$(_elf_dynamic_values "$dynamic_text" RUNPATH | tr ':' '\n')
+    rpath_raw=$(_elf_dynamic_values "$dynamic_text" RPATH | sed -n '1p')
+    runpath_raw=$(_elf_dynamic_values "$dynamic_text" RUNPATH | sed -n '1p')
+    rpath_lines=$(tr ':' '\n' <<<"$rpath_raw")
+    runpath_lines=$(tr ':' '\n' <<<"$runpath_raw")
+    local declared_path expanded_path origin_path
+    origin_path=$(realpath -m "$(dirname "$elf_path")")
+    for declared_path in "$rpath_raw" "$runpath_raw"; do
+        [[ -n "$declared_path" ]] || continue
+        if [[ "$declared_path" == :* || "$declared_path" == *: || "$declared_path" == *::* ]]; then
+            errors+=("RPATH/RUNPATH contains an empty current-directory entry")
+            valid=false
+        fi
+    done
+    while IFS= read -r declared_path; do
+        [[ -n "$declared_path" ]] || continue
+        expanded_path=""
+        case "$declared_path" in
+            /*) ;;
+            '$ORIGIN'|'${ORIGIN}') ;;
+            '$ORIGIN/'*) expanded_path="${origin_path}/${declared_path#\$ORIGIN/}" ;;
+            '${ORIGIN}/'*) expanded_path="${origin_path}/${declared_path#\$\{ORIGIN\}/}" ;;
+            *)
+                errors+=("relative or unsupported RPATH/RUNPATH entry: $declared_path")
+                valid=false
+                continue
+                ;;
+        esac
+        if [[ -n "${expanded_path:-}" ]]; then
+            expanded_path=$(realpath -m "$expanded_path")
+            if [[ "$expanded_path" != "$origin_path" \
+                && "$expanded_path" != "${origin_path}/"* ]]; then
+                errors+=("ORIGIN RPATH/RUNPATH escapes the declaring object directory: $declared_path")
+                valid=false
+            fi
+            expanded_path=""
+        fi
+    done < <(printf '%s\n%s\n' "$rpath_lines" "$runpath_lines")
+    while IFS= read -r declared_path; do
+        if [[ "$declared_path" == */* ]]; then
+            errors+=("DT_NEEDED entry contains a path: $declared_path")
+            valid=false
+        fi
+    done <<<"$needed_lines"
     dynamic_flags=$(awk '/\((FLAGS|FLAGS_1)\)/ {sub(/^[[:space:]]*/, ""); print}' <<<"$dynamic_text")
     audit_tags=$(awk '/\((AUDIT|DEPAUDIT|FILTER|AUXILIARY)\)/ {sub(/^[[:space:]]*/, ""); print}' <<<"$dynamic_text")
     if grep -qE '\(TEXTREL\)|\(FLAGS\).*TEXTREL' <<<"$dynamic_text"; then
@@ -1460,6 +1501,15 @@ _runtime_profile_manifest_validate() {
         and (.provided_versions | type) == "array"
         and (.allowed_tunables | type) == "array"
         and all(.allowed_tunables[]; test("^[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+$"))
+        and (.loader_audit.path | under_prefix)
+        and (.loader_audit.sha256 | test("^[0-9a-f]{64}$"))
+        and .loader_audit.protocol == 1
+        and .loader_audit.fd == 198
+        and ((.loader_audit.path | ltrimstr($prefix + "/")) as $audit_path
+            | .loader_audit.sha256 as $audit_hash
+            | any(.files[]; .type == "file" and .path == $audit_path
+                and .sha256 == $audit_hash and .mode == "755"))
+        and (.loader_policy.glibc_hwcaps_mask | type) == "string"
         and (.termux.package_name | type) == "string"
         and (.termux.prefix | type) == "string"
         and (.termux.package_revision | type) == "string"
@@ -2211,13 +2261,17 @@ _loader_clean_env() {
     env -i \
         HOME="${HOME:-/}" \
         PATH="${PATH:-/usr/bin:/bin}" \
-        LANG=C.UTF-8 \
-        LC_ALL=C.UTF-8 \
+        LANG=C \
+        LC_ALL=C \
         "$@"
 }
 
 _loader_normalize_output() {
     local from_path="$1" to_path="$2"
+    if [[ "$from_path" == "$to_path" ]]; then
+        cat
+        return 0
+    fi
     awk -v from="$from_path" -v to="$to_path" '
         {
             line=$0
@@ -2232,7 +2286,7 @@ _loader_normalize_output() {
 
 _loader_list_paths() {
     awk '
-        /=>[[:space:]]*\// {
+        /=>[[:space:]]*/ {
             line=$0
             sub(/^.*=>[[:space:]]*/, "", line)
             sub(/[[:space:]].*$/, "", line)
@@ -2246,6 +2300,133 @@ _loader_list_paths() {
             print line
         }
     '
+}
+
+_loader_hex_decode() {
+    local encoded="$1" pair byte decoded=""
+    [[ ${#encoded} -le 32768 && $(( ${#encoded} % 2 )) -eq 0 \
+        && "$encoded" != *[!0-9a-f]* ]] || return 1
+    while [[ -n "$encoded" ]]; do
+        pair=${encoded:0:2}
+        [[ "$pair" != 00 ]] || return 1
+        printf -v byte '%b' "\\x${pair}"
+        decoded+="$byte"
+        encoded=${encoded:2}
+    done
+    [[ "$decoded" != *[$'\001'-$'\037'$'\177']* ]] || return 1
+    REPLY="$decoded"
+}
+
+_loader_parse_audit() {
+    local audit_file="$1" line kind object_id lmid encoded name flag requester
+    local started=0 consistent=0 opened_file search_file
+    local -a fields=()
+    opened_file=$(mktemp "${TMP_DIR}/loader-audit-open.XXXXXX")
+    search_file=$(mktemp "${TMP_DIR}/loader-audit-search.XXXXXX")
+    : >"$opened_file"
+    : >"$search_file"
+    while IFS= read -r line; do
+        IFS=$'\t' read -r -a fields <<<"$line"
+        [[ "${fields[0]:-}" == GXA1 ]] || {
+            rm -f "$opened_file" "$search_file"
+            return 1
+        }
+        kind=${fields[1]:-}
+        case "$kind" in
+            START)
+                [[ ${#fields[@]} -eq 2 && "$started" -eq 0 ]] || {
+                    rm -f "$opened_file" "$search_file"; return 1;
+                }
+                started=1
+                ;;
+            CONSISTENT)
+                [[ ${#fields[@]} -eq 2 && "$started" -eq 1 ]] || {
+                    rm -f "$opened_file" "$search_file"; return 1;
+                }
+                consistent=1
+                ;;
+            OPEN)
+                [[ "$started" -eq 1 && ${#fields[@]} -ge 4 && ${#fields[@]} -le 5 ]] || {
+                    rm -f "$opened_file" "$search_file"; return 1;
+                }
+                object_id=${fields[2]}
+                lmid=${fields[3]}
+                encoded=${fields[4]:-}
+                [[ "$object_id" =~ ^[0-9a-f]{16}$ && "$lmid" =~ ^[0-9a-f]{16}$ ]] \
+                    && _loader_hex_decode "$encoded" || {
+                        rm -f "$opened_file" "$search_file"; return 1;
+                    }
+                name=$REPLY
+                printf '%s\t%s\t%s\n' "$object_id" "$lmid" "$name" >>"$opened_file"
+                ;;
+            SEARCH)
+                [[ "$started" -eq 1 && ${#fields[@]} -eq 5 ]] || {
+                    rm -f "$opened_file" "$search_file"; return 1;
+                }
+                requester=${fields[2]}
+                flag=${fields[3]}
+                encoded=${fields[4]}
+                [[ "$requester" =~ ^[0-9a-f]{16}$ && "$flag" =~ ^[0-9a-f]{16}$ \
+                    && ${#encoded} -le 32768 && $(( ${#encoded} % 2 )) -eq 0 \
+                    && "$encoded" != *[!0-9a-f]* ]] || {
+                        rm -f "$opened_file" "$search_file"; return 1;
+                    }
+                if [[ "$flag" == 0000000000000001 ]]; then
+                    _loader_hex_decode "$encoded" || {
+                        rm -f "$opened_file" "$search_file"; return 1;
+                    }
+                    name=$REPLY
+                    printf '%s\t%s\t%s\n' "$requester" "$flag" "$name" >>"$search_file"
+                fi
+                ;;
+            *)
+                rm -f "$opened_file" "$search_file"
+                return 1
+                ;;
+        esac
+    done <"$audit_file"
+    [[ "$started" -eq 1 ]] || {
+        rm -f "$opened_file" "$search_file"
+        return 1
+    }
+    local consistent_json=false opened_json searches_json
+    [[ "$consistent" -eq 1 ]] && consistent_json=true
+    opened_json=$(jq -Rn '[inputs | split("\t")
+        | {object_id: .[0], lmid: .[1], path: .[2]}]' <"$opened_file")
+    searches_json=$(jq -Rn '[inputs | split("\t")
+        | {requester: .[0], flag: .[1], name: .[2]}]' <"$search_file")
+    jq -n --argjson consistent "$consistent_json" \
+        --argjson opened "$opened_json" --argjson searches "$searches_json" \
+        '{protocol: 1, complete: false, consistent: $consistent,
+          opened: $opened, searches: $searches}'
+    rm -f "$opened_file" "$search_file"
+}
+
+_loader_audit_matches_list() {
+    local audit_json="$1" list_output="$2" path
+    local audit_paths list_paths
+    audit_paths=$(mktemp "${TMP_DIR}/loader-audit-paths.XXXXXX")
+    list_paths=$(mktemp "${TMP_DIR}/loader-list-paths.XXXXXX")
+    : >"$audit_paths"
+    : >"$list_paths"
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        [[ "$path" != linux-vdso.so.* && "$path" == /* ]] || continue
+        realpath -m "$path"
+    done < <(jq -r '.opened[] | select(.lmid == "0000000000000000") | .path' \
+        <<<"$audit_json") | LC_ALL=C sort -u >"$audit_paths"
+    while IFS= read -r path; do
+        [[ -n "$path" && "$path" == /* ]] || {
+            rm -f "$audit_paths" "$list_paths"
+            return 1
+        }
+        realpath -m "$path"
+    done < <(_loader_list_paths <<<"$list_output") | LC_ALL=C sort -u >"$list_paths"
+    if ! cmp -s "$audit_paths" "$list_paths"; then
+        rm -f "$audit_paths" "$list_paths"
+        return 1
+    fi
+    rm -f "$audit_paths" "$list_paths"
 }
 
 _loader_path_is_allowed() {
@@ -2270,16 +2451,30 @@ loader_verify_target() {
     local target_bin="$4" inspection="$5"
     local proc_exe_mode="${6:-off}"
     local loader profile_libs library_path verify_output list_output normalized_list list_hash proc_shim=""
+    local audit_path audit_file audit_json audit_required=false hwcaps_mask hwcaps_policy=false
     local allowed_tunables
     local verify_exit=0 list_exit=0 valid=true
     local target_origin declared_path expanded_path resolved_path canonical_path
     local unexpected_lines="" unexpected_json
     local allowed_roots=()
+    local -a loader_paths=()
 
     loader=$(jq -r '.loader' <<<"$profile_json")
     profile_libs=$(jq -r '.library_dirs | join(":")' <<<"$profile_json")
     library_path="${actual_app_lib}:${profile_libs}"
     allowed_tunables=$(jq -r '.allowed_tunables // [] | join(":")' <<<"$profile_json")
+    audit_path=$(jq -r '.loader_audit.path // empty' <<<"$profile_json")
+    hwcaps_mask=$(jq -r '.loader_policy.glibc_hwcaps_mask // empty' <<<"$profile_json")
+    if jq -e '.loader_policy | has("glibc_hwcaps_mask")' <<<"$profile_json" >/dev/null 2>&1; then
+        hwcaps_policy=true
+    fi
+    if [[ "$(jq -r '.kind' <<<"$profile_json")" == managed ]]; then
+        audit_required=true
+    fi
+    if [[ -n "$audit_path" && ! -f "$audit_path" ]]; then
+        echo "[glibcx] Error: selected runtime's loader-audit module is missing." >&2
+        return 1
+    fi
     if [[ "$proc_exe_mode" == on ]]; then
         proc_shim=$(jq -r '.proc_exe_shim.path // empty' <<<"$profile_json")
         if [[ -z "$proc_shim" || ! -f "$proc_shim" ]]; then
@@ -2301,10 +2496,16 @@ loader_verify_target() {
             /*) expanded_path="$declared_path" ;;
             *) continue ;;
         esac
-        allowed_roots+=("$(realpath -m "$expanded_path")")
+        canonical_path=$(realpath -m "$expanded_path")
+        if ! _loader_path_is_allowed "$canonical_path" "${allowed_roots[@]}"; then
+            unexpected_lines+="disallowed loader search path: ${canonical_path}"$'\n'
+            valid=false
+        fi
     done < <(jq -r '.dynamic.rpath[], .dynamic.runpath[]' <<<"$inspection")
 
-    local verify_args=(--inhibit-cache --library-path "$library_path")
+    local verify_args=(--inhibit-cache)
+    [[ "$hwcaps_policy" == true ]] && verify_args+=(--glibc-hwcaps-mask "$hwcaps_mask")
+    verify_args+=(--library-path "$library_path")
     [[ -n "$proc_shim" ]] && verify_args+=(--preload "$proc_shim")
     verify_args+=(--verify "$target_bin")
     if verify_output=$(_loader_clean_env GLIBC_TUNABLES="$allowed_tunables" \
@@ -2314,29 +2515,62 @@ loader_verify_target() {
         verify_exit=$?
         valid=false
     fi
-    local list_args=(--inhibit-cache --library-path "$library_path")
+    local list_args=(--inhibit-cache)
+    [[ "$hwcaps_policy" == true ]] && list_args+=(--glibc-hwcaps-mask "$hwcaps_mask")
+    list_args+=(--library-path "$library_path")
+    audit_file=$(mktemp "${TMP_DIR}/loader-audit.XXXXXX")
+    : >"$audit_file"
+    [[ -n "$audit_path" ]] && list_args+=(--audit "$audit_path")
     [[ -n "$proc_shim" ]] && list_args+=(--preload "$proc_shim")
     list_args+=(--list "$target_bin")
     if list_output=$(_loader_clean_env GLIBC_TUNABLES="$allowed_tunables" \
-        "$loader" "${list_args[@]}" 2>&1); then
+        "$loader" "${list_args[@]}" 198>"$audit_file" 2>&1); then
         list_exit=0
     else
         list_exit=$?
         valid=false
     fi
+    if [[ -n "$audit_path" ]]; then
+        if ! audit_json=$(_loader_parse_audit "$audit_file"); then
+            audit_json='{"protocol":1,"complete":false,"opened":[],"searches":[]}'
+            valid=false
+        elif [[ "$list_exit" -eq 0 ]]; then
+            if _loader_audit_matches_list "$audit_json" "$list_output"; then
+                audit_json=$(jq -c '.complete = true' <<<"$audit_json")
+            else
+                valid=false
+            fi
+        fi
+    else
+        audit_json='null'
+        [[ "$audit_required" == false ]] || valid=false
+    fi
+    rm -f "$audit_file"
     normalized_list=$(printf '%s\n' "$list_output" \
         | _loader_normalize_output "$actual_app_lib" "$manifest_app_lib")
     list_hash=$(_sha256_text "$normalized_list")
 
     if [[ "$list_exit" -eq 0 ]]; then
-        while IFS= read -r resolved_path; do
+        if [[ "$audit_json" != null ]]; then
+            mapfile -t loader_paths < <(jq -r '.opened[] | select(.lmid == "0000000000000000") | .path' \
+                <<<"$audit_json")
+        else
+            mapfile -t loader_paths < <(_loader_list_paths <<<"$list_output")
+        fi
+        for resolved_path in "${loader_paths[@]}"; do
             [[ -n "$resolved_path" ]] || continue
+            [[ "$resolved_path" != linux-vdso.so.* ]] || continue
+            if [[ "$resolved_path" != /* ]]; then
+                unexpected_lines+="non-absolute loader result: ${resolved_path}"$'\n'
+                valid=false
+                continue
+            fi
             canonical_path=$(realpath -m "$resolved_path")
             if ! _loader_path_is_allowed "$canonical_path" "${allowed_roots[@]}"; then
                 unexpected_lines+="${canonical_path}"$'\n'
                 valid=false
             fi
-        done < <(_loader_list_paths <<<"$list_output")
+        done
     fi
     unexpected_json=$(printf '%s' "$unexpected_lines" | _elf_lines_to_json)
 
@@ -2351,6 +2585,7 @@ loader_verify_target() {
         --arg proc_exe_mode "$proc_exe_mode" \
         --arg proc_exe_shim "$proc_shim" \
         --argjson unexpected "$unexpected_json" \
+        --argjson audit "$audit_json" \
         '{
             verified: $verified,
             scope: "startup-loader-verified",
@@ -2360,7 +2595,8 @@ loader_verify_target() {
             library_path: $library_path,
             proc_exe_mode: $proc_exe_mode,
             proc_exe_shim: (if $proc_exe_shim == "" then null else $proc_exe_shim end),
-            unexpected_resolutions: $unexpected
+            unexpected_resolutions: $unexpected,
+            audit: $audit
         }'
 }
 
@@ -2879,14 +3115,20 @@ _resolver_expand_search_path() {
 _resolver_find_library() {
     local soname="$1" app_lib="$2" profile_json="$3" origin="$4" inspection="$5"
     local search_dir declared
-    local search_dirs=("$app_lib")
+    local search_dirs=()
+    if [[ "$(jq '.dynamic.runpath | length' <<<"$inspection")" -eq 0 ]]; then
+        while IFS= read -r declared; do
+            search_dir=$(_resolver_expand_search_path "$declared" "$origin")
+            [[ -n "$search_dir" ]] && search_dirs+=("$search_dir")
+        done < <(jq -r '.dynamic.rpath[]' <<<"$inspection")
+    fi
+    search_dirs+=("$app_lib")
     while IFS= read -r search_dir; do search_dirs+=("$search_dir"); done \
         < <(jq -r '.library_dirs[]' <<<"$profile_json")
-    search_dirs+=("$origin")
     while IFS= read -r declared; do
         search_dir=$(_resolver_expand_search_path "$declared" "$origin")
         [[ -n "$search_dir" ]] && search_dirs+=("$search_dir")
-    done < <(jq -r '.dynamic.rpath[], .dynamic.runpath[]' <<<"$inspection")
+    done < <(jq -r '.dynamic.runpath[]' <<<"$inspection")
     for search_dir in "${search_dirs[@]}"; do
         if [[ -f "${search_dir}/${soname}" ]]; then
             realpath -m "${search_dir}/${soname}"
@@ -2896,53 +3138,61 @@ _resolver_find_library() {
     return 1
 }
 
-# Resolve and vendor the startup DSO closure before the authoritative loader
-# check. Emits the authenticated repository metadata used, or JSON null.
+# Resolve and vendor the startup DSO closure by repeatedly asking the selected
+# loader what is missing. This preserves the loader's per-object RPATH/RUNPATH
+# semantics instead of trying to duplicate them in Bash.
 resolver_prepare_startup_closure() {
     local profile_json="$1" target_bin="$2" target_inspection="$3" app_lib="$4"
     local offline="$5" refresh="$6" no_resolve="$7"
-    local origin soname library_path dso_inspection snapshot_dir="" provider package_json package_file
-    local processed=0 queue_index=0
-    local queue=()
-    declare -A seen=()
-    origin=$(dirname "$target_bin")
-    while IFS= read -r soname; do queue+=("$soname"); done \
-        < <(jq -r '.dynamic.needed[]' <<<"$target_inspection")
-    while (( queue_index < ${#queue[@]} )); do
-        soname=${queue[$queue_index]}
-        queue_index=$((queue_index + 1))
-        [[ -n "$soname" && -z "${seen[$soname]:-}" ]] || continue
-        seen[$soname]=1
-        processed=$((processed + 1))
-        if (( processed > 512 )); then
-            echo "[glibcx] Error: dependency closure exceeds 512 unique SONAMEs." >&2
+    local proc_exe_mode="${8:-off}"
+    local probe_json list_output soname snapshot_dir="" provider package_json package_file
+    local iteration=0
+    declare -A attempted=()
+    while :; do
+        probe_json=$(loader_verify_target "$profile_json" "$app_lib" "$app_lib" \
+            "$target_bin" "$target_inspection" "$proc_exe_mode") || return 1
+        if [[ "$(jq -r '.verified' <<<"$probe_json")" == true ]]; then
+            break
+        fi
+        [[ "$no_resolve" == false ]] || break
+        list_output=$(jq -r '.list.output' <<<"$probe_json")
+        soname=$(LC_ALL=C sed -n \
+            's/.*error while loading shared libraries: \([^:][^:]*\): cannot open shared object file.*/\1/p' \
+            <<<"$list_output" | LC_ALL=C tail -n 1)
+        if [[ -z "$soname" || "$soname" == */* ]]; then
+            echo "[glibcx] Error: loader failed without a safe missing SONAME to resolve." >&2
+            jq -r '
+                if .verify.exit_code != 0 then "  --verify: " + .verify.output else empty end,
+                if .list.exit_code != 0 then "  --list: " + .list.output else empty end,
+                .unexpected_resolutions[]? | "  " + .
+            ' <<<"$probe_json" >&2
             return 1
         fi
-        if library_path=$(_resolver_find_library "$soname" "$app_lib" "$profile_json" \
-            "$origin" "$target_inspection"); then
-            dso_inspection=$(elf_inspect "$library_path" dso)
-            [[ "$(jq -r '.valid' <<<"$dso_inspection")" == true ]] || return 1
-        else
-            if [[ "$no_resolve" == true ]]; then
-                continue
-            fi
-            if [[ -z "$snapshot_dir" ]]; then
-                snapshot_dir=$(_resolver_repository_snapshot "$offline" "$refresh") || return 1
-                refresh=false
-            fi
-            provider=$(_resolver_contents_provider "${snapshot_dir}/Contents-aarch64" "$soname") \
-                || return 1
-            package_json=$(_resolver_package_metadata "${snapshot_dir}/Packages" "$provider") \
-                || return 1
-            package_file=$(_resolver_download_package "$package_json" "$offline") || return 1
-            _resolver_copy_package_dso "$package_file" "$soname" "$app_lib" \
-                "$package_json" "$snapshot_dir" || return 1
-            library_path=$(_resolver_find_library "$soname" "$app_lib" "$profile_json" \
-                "$origin" "$target_inspection") || return 1
-            dso_inspection=$(elf_inspect "$library_path" dso)
+        if [[ -n "${attempted[$soname]:-}" ]]; then
+            echo "[glibcx] Error: loader still cannot resolve '$soname' after it was vendored." >&2
+            return 1
         fi
-        while IFS= read -r soname; do queue+=("$soname"); done \
-            < <(jq -r '.dynamic.needed[]' <<<"$dso_inspection")
+        attempted[$soname]=1
+        iteration=$((iteration + 1))
+        if (( iteration > 512 )); then
+            echo "[glibcx] Error: dependency closure exceeds 512 fetched SONAMEs." >&2
+            return 1
+        fi
+        if [[ -z "$snapshot_dir" ]]; then
+            snapshot_dir=$(_resolver_repository_snapshot "$offline" "$refresh") || return 1
+            refresh=false
+        fi
+        provider=$(_resolver_contents_provider "${snapshot_dir}/Contents-aarch64" "$soname") \
+            || return 1
+        package_json=$(_resolver_package_metadata "${snapshot_dir}/Packages" "$provider") \
+            || return 1
+        package_file=$(_resolver_download_package "$package_json" "$offline") || return 1
+        _resolver_copy_package_dso "$package_file" "$soname" "$app_lib" \
+            "$package_json" "$snapshot_dir" || return 1
+        [[ -f "${app_lib}/${soname}" ]] || {
+            echo "[glibcx] Error: repository package did not provide '$soname'." >&2
+            return 1
+        }
     done
     if [[ -f "$(dirname "$app_lib")/resolver-packages.json" ]]; then
         jq -c '.repository' "$(dirname "$app_lib")/resolver-packages.json"
@@ -2987,7 +3237,7 @@ _resolver_package_for_path() {
 resolver_manifest_dependencies() {
     local verification_json="$1" profile_json="$2" actual_app_lib="$3" manifest_app_lib="$4"
     local list_output soname manifest_path actual_path inspection package_record package_name package_version
-    local source_kind file_hash build_id needed_json entry_file provenance_file provenance_entry
+    local source_kind file_hash build_id needed_json entry_file loader_entries_file provenance_file provenance_entry
     local package_sha256 repository_snapshot_digest
     local profile_roots=()
 
@@ -3001,8 +3251,30 @@ resolver_manifest_dependencies() {
     done < <(jq -r '.library_dirs[]' <<<"$profile_json")
 
     entry_file=$(mktemp "${TMP_DIR}/dependency-lock.XXXXXX")
+    loader_entries_file=$(mktemp "${TMP_DIR}/dependency-loader-entries.XXXXXX")
     provenance_file="$(dirname "$actual_app_lib")/resolver-packages.json"
     : >"$entry_file"
+    : >"$loader_entries_file"
+    if jq -e '.audit != null' <<<"$verification_json" >/dev/null; then
+        while IFS= read -r actual_path; do
+            [[ -n "$actual_path" ]] || continue
+            [[ "$actual_path" != linux-vdso.so.* ]] || continue
+            if [[ "$actual_path" != /* ]]; then
+                echo "[glibcx] Error: audit reported a non-absolute loaded object: '$actual_path'." >&2
+                rm -f "$entry_file" "$loader_entries_file"
+                return 1
+            fi
+            manifest_path="$actual_path"
+            if [[ "$actual_path" == "$actual_app_lib" || "$actual_path" == "${actual_app_lib}/"* ]]; then
+                manifest_path="${manifest_app_lib}${actual_path#"$actual_app_lib"}"
+            fi
+            printf '%s\t%s\n' "$(basename "$actual_path")" "$manifest_path" \
+                >>"$loader_entries_file"
+        done < <(jq -r '.audit.opened[]
+            | select(.lmid == "0000000000000000") | .path' <<<"$verification_json")
+    else
+        _resolver_loader_entries <<<"$list_output" >"$loader_entries_file"
+    fi
     while IFS=$'\t' read -r soname manifest_path; do
         [[ -n "$soname" && -n "$manifest_path" ]] || continue
         actual_path="$manifest_path"
@@ -3011,16 +3283,18 @@ resolver_manifest_dependencies() {
         fi
         if [[ ! -f "$actual_path" ]]; then
             echo "[glibcx] Error: loader resolved '$soname' to missing file '$actual_path'." >&2
-            rm -f "$entry_file"
+            rm -f "$entry_file" "$loader_entries_file"
             return 1
         fi
 
         inspection=$(elf_inspect "$actual_path" dso)
         if [[ "$(jq -r '.valid' <<<"$inspection")" != "true" ]]; then
             echo "[glibcx] Error: resolved dependency '$actual_path' is not a valid AArch64 DSO." >&2
-            rm -f "$entry_file"
+            rm -f "$entry_file" "$loader_entries_file"
             return 1
         fi
+        soname=$(jq -r --arg fallback "$(basename "$actual_path")" \
+            '.dynamic.soname // $fallback' <<<"$inspection")
         file_hash=$(_sha256_file "$actual_path")
         build_id=$(jq -r '.notes.build_id // empty' <<<"$inspection")
         needed_json=$(jq -c '.dynamic.needed' <<<"$inspection")
@@ -3072,10 +3346,10 @@ resolver_manifest_dependencies() {
                 needed: $needed,
                 status: "resolved"
             }' >>"$entry_file"
-    done < <(_resolver_loader_entries <<<"$list_output")
+    done <"$loader_entries_file"
 
     jq -s 'unique_by(.path) | sort_by(.soname, .path)' "$entry_file"
-    rm -f "$entry_file"
+    rm -f "$entry_file" "$loader_entries_file"
 }
 
 cmd_deps() {
@@ -3458,7 +3732,8 @@ cmd_patch() {
 
     local verification_json dependencies_json repository_json
     if ! repository_json=$(resolver_prepare_startup_closure "$profile_json" "$target_bin" \
-        "$inspection" "${staging_dir}/lib" "$offline" "$refresh" "$no_resolve"); then
+        "$inspection" "${staging_dir}/lib" "$offline" "$refresh" "$no_resolve" \
+        "$proc_exe_mode"); then
         rm -rf "${staging_dir:?}"
         lock_release "$app_lock"
         lock_release "$registry_lock"
@@ -3514,13 +3789,19 @@ cmd_patch() {
     # --- 4. Compile C userland-exec wrapper ------------------------------------
     wrapper_c="${staging_dir}/wrapper.c"
     wrapper_bin="${staging_dir}/wrapper"
-    local target_c_bytes ldso_c_bytes library_path_c_bytes ssl_cert_path_c_bytes
+    local target_c_bytes ldso_c_bytes library_path_c_bytes hwcaps_mask_c_bytes hwcaps_policy_c
+    local ssl_cert_path_c_bytes
     local env_real_c_bytes env_wrapper_c_bytes env_app_c_bytes env_mode_c_bytes env_tunables_c_bytes
     local env_ssl_cert_c_bytes trace_marker_c_bytes proc_exe_shim_c_bytes
     target_c_bytes=$(_c_byte_array "$target_bin")
     ldso_c_bytes=$(_c_byte_array "$runtime_loader")
     library_path="$(state_current_lib_path "$app_id"):${profile_lib_path}"
     library_path_c_bytes=$(_c_byte_array "$library_path")
+    hwcaps_mask_c_bytes=$(_c_byte_array \
+        "$(jq -r '.loader_policy.glibc_hwcaps_mask // empty' <<<"$profile_json")")
+    hwcaps_policy_c=0
+    jq -e '.loader_policy | has("glibc_hwcaps_mask")' <<<"$profile_json" >/dev/null 2>&1 \
+        && hwcaps_policy_c=1
     ssl_cert_path_c_bytes=$(_c_byte_array \
         "${PREFIX:-/data/data/com.termux/files/usr}/etc/tls/cert.pem")
     env_real_c_bytes=$(_c_byte_array "GLIBCX_REAL_EXE=${target_bin}")
@@ -3577,6 +3858,8 @@ static int is_power_of_two(size_t value) {
 static const char target_bin[] = { ${target_c_bytes} };
 static const char ldso_path[] = { ${ldso_c_bytes} };
 static const char library_path[] = { ${library_path_c_bytes} };
+static const char hwcaps_mask[] = { ${hwcaps_mask_c_bytes} };
+static const int use_hwcaps_policy = ${hwcaps_policy_c};
 static const char ssl_cert_path[] = { ${ssl_cert_path_c_bytes} };
 static const char env_real_exe[] = { ${env_real_c_bytes} };
 static const char env_wrapper_exe[] = { ${env_wrapper_c_bytes} };
@@ -3790,7 +4073,8 @@ int main(int argc, const char **argv, const char **envp) {
     size_t user_arg_start = trace_mode ? 2 : 1;
     size_t user_arg_count = (size_t)argc - user_arg_start;
     int use_proc_exe_shim = proc_exe_shim[0] != '\0';
-    size_t new_argc = 5 + (use_proc_exe_shim ? 2 : 0) + user_arg_count;
+    size_t new_argc = 5 + (use_hwcaps_policy ? 2 : 0) +
+        (use_proc_exe_shim ? 2 : 0) + user_arg_count;
 
     if (new_argc >= MAX_ARGS) {
         die("too many arguments (limit 4096)");
@@ -3803,6 +4087,10 @@ int main(int argc, const char **argv, const char **envp) {
     size_t argv_out = 0;
     argv_a[argv_out++] = PUSH_STR(ldso);
     argv_a[argv_out++] = PUSH_STR("--inhibit-cache");
+    if (use_hwcaps_policy) {
+        argv_a[argv_out++] = PUSH_STR("--glibc-hwcaps-mask");
+        argv_a[argv_out++] = PUSH_STR(hwcaps_mask);
+    }
     argv_a[argv_out++] = PUSH_STR("--library-path");
     argv_a[argv_out++] = PUSH_STR(library_path);
     if (use_proc_exe_shim) {

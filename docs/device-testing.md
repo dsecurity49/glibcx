@@ -1,26 +1,39 @@
 # Device testing
 
 glibcx crosses two libc environments: Termux starts on Android's Bionic libc,
-then the wrapper hands a Linux binary to an Android-patched glibc loader. A
-normal Linux CI runner cannot reproduce Android's linker environment, SELinux
-policy, seccomp filters, or vendor kernel.
+then the wrapper hands a Linux binary to an Android-patched glibc loader.
+Standard Linux CI cannot reproduce Android's linker environment, SELinux
+policy, seccomp filters, page size, or vendor kernel.
 
-## Can you help test glibcx?
+## Add a device result
 
-I only have access to a limited number of Android devices, so results from other
-phones are genuinely useful. Repeated Android versions and phone models are
-useful too; vendors ship different kernels and security policies.
+I can test only a few Android devices myself. Community reports are how this
+matrix grows, and repeated Android versions or phone models still matter
+because vendors ship different kernels and security policies.
 
-No particular Android version is a prerequisite for helping, and missing
-community coverage for a version does not block a release. The results below
-state exactly what was tested instead of implying coverage that does not exist.
+No Android version is singled out as more important than another, and a version
+without a community report does not block a release. The table says exactly
+what has been tested instead of implying coverage we do not have.
 
-From a clean checkout of the commit you want to test, install the test tools:
+Install the regular test tools and the repository-enabling package first:
 
 ```bash
-pkg update
-pkg install git clang jq curl file binutils nodejs util-linux gnupg xz-utils \
-  patchelf gzip glibc-repo glibc-runner
+pkg update -y
+pkg install -y git clang jq curl file binutils nodejs util-linux gnupg xz-utils \
+  patchelf gzip glibc-repo
+pkg update -y
+pkg install -y glibc-runner
+```
+
+The second `pkg update` is required on a fresh Termux installation:
+`glibc-repo` adds the repository that contains `glibc-runner`.
+
+Clone the repository, then check out the exact commit you want to report:
+
+```bash
+git clone https://github.com/dsecurity49/glibcx.git
+cd glibcx
+git checkout <full-commit-sha>
 ```
 
 Then run:
@@ -29,10 +42,11 @@ Then run:
 bash ci/android_device_matrix.sh
 ```
 
-The command builds glibcx, checks that the generated executable matches the
-checked-in one, runs the Android-relevant integration tests, and creates a
+The script requires a clean tracked worktree. It builds glibcx, compares the
+generated executable with the checked-in one, runs the Android-relevant tests
+and live repository probe, and creates a
 `glibcx-device-report-*.tar.gz` archive. It does not install glibcx globally or
-modify the binaries used as fixtures.
+modify fixture binaries.
 
 The report replaces home, Termux-prefix, and repository paths in logs. It does
 not include device serial numbers, IP addresses, Android IDs, usernames, UIDs,
@@ -43,19 +57,19 @@ tar -tzf glibcx-device-report-*.tar.gz
 tar -xzf glibcx-device-report-*.tar.gz
 ```
 
-Attach the archive to a device-test issue. A failed run is useful: include the
-archive and say what you were doing when it failed. If you also have a fix, open
-a PR and link it to the issue.
+The archive can be attached to a device-test issue. Failed runs belong in the
+matrix discussion too; add a short note about what happened. If the report led
+to a fix, link the PR so future readers can follow the whole story.
 
 ## Accepted results
 
-Reviewed reports are stored as small JSON records in `docs/device-results/`.
+Reviewed reports are stored as small JSON records in
+[`docs/device-results/`](device-results/).
 Raw logs remain on the linked issue. CI validates the report schema and rejects
 common private runtime fields before a result can be merged.
 
-| Android | Device | Kernel | Page size | Termux | Commit | Result | Issue |
+| Android | Device | Kernel | Page size | Termux | Commit | Result | Source |
 |---|---|---|---:|---|---|---|---|
-| 12 (API 31) | vivo V2022 | 4.14.180-perf+ | 4 KB | F-Droid 0.119.0-beta.3 | `aa1fd46` | Pass | Maintainer test |
+| 12 (API 31) | vivo V2022 | 4.14.180-perf+ | 4 KB | F-Droid 0.119.0-beta.3 | `aa1fd46` | Pass | Local test |
 
-This table records where glibcx has actually been exercised. It is evidence,
-not a promise that every binary will work on every device.
+This is a record of real runs, not a claim that every binary works everywhere.

@@ -513,14 +513,20 @@ _resolver_expand_search_path() {
 _resolver_find_library() {
     local soname="$1" app_lib="$2" profile_json="$3" origin="$4" inspection="$5"
     local search_dir declared
-    local search_dirs=("$app_lib")
+    local search_dirs=()
+    if [[ "$(jq '.dynamic.runpath | length' <<<"$inspection")" -eq 0 ]]; then
+        while IFS= read -r declared; do
+            search_dir=$(_resolver_expand_search_path "$declared" "$origin")
+            [[ -n "$search_dir" ]] && search_dirs+=("$search_dir")
+        done < <(jq -r '.dynamic.rpath[]' <<<"$inspection")
+    fi
+    search_dirs+=("$app_lib")
     while IFS= read -r search_dir; do search_dirs+=("$search_dir"); done \
         < <(jq -r '.library_dirs[]' <<<"$profile_json")
-    search_dirs+=("$origin")
     while IFS= read -r declared; do
         search_dir=$(_resolver_expand_search_path "$declared" "$origin")
         [[ -n "$search_dir" ]] && search_dirs+=("$search_dir")
-    done < <(jq -r '.dynamic.rpath[], .dynamic.runpath[]' <<<"$inspection")
+    done < <(jq -r '.dynamic.runpath[]' <<<"$inspection")
     for search_dir in "${search_dirs[@]}"; do
         if [[ -f "${search_dir}/${soname}" ]]; then
             realpath -m "${search_dir}/${soname}"
@@ -530,53 +536,61 @@ _resolver_find_library() {
     return 1
 }
 
-# Resolve and vendor the startup DSO closure before the authoritative loader
-# check. Emits the authenticated repository metadata used, or JSON null.
+# Resolve and vendor the startup DSO closure by repeatedly asking the selected
+# loader what is missing. This preserves the loader's per-object RPATH/RUNPATH
+# semantics instead of trying to duplicate them in Bash.
 resolver_prepare_startup_closure() {
     local profile_json="$1" target_bin="$2" target_inspection="$3" app_lib="$4"
     local offline="$5" refresh="$6" no_resolve="$7"
-    local origin soname library_path dso_inspection snapshot_dir="" provider package_json package_file
-    local processed=0 queue_index=0
-    local queue=()
-    declare -A seen=()
-    origin=$(dirname "$target_bin")
-    while IFS= read -r soname; do queue+=("$soname"); done \
-        < <(jq -r '.dynamic.needed[]' <<<"$target_inspection")
-    while (( queue_index < ${#queue[@]} )); do
-        soname=${queue[$queue_index]}
-        queue_index=$((queue_index + 1))
-        [[ -n "$soname" && -z "${seen[$soname]:-}" ]] || continue
-        seen[$soname]=1
-        processed=$((processed + 1))
-        if (( processed > 512 )); then
-            echo "[glibcx] Error: dependency closure exceeds 512 unique SONAMEs." >&2
+    local proc_exe_mode="${8:-off}"
+    local probe_json list_output soname snapshot_dir="" provider package_json package_file
+    local iteration=0
+    declare -A attempted=()
+    while :; do
+        probe_json=$(loader_verify_target "$profile_json" "$app_lib" "$app_lib" \
+            "$target_bin" "$target_inspection" "$proc_exe_mode") || return 1
+        if [[ "$(jq -r '.verified' <<<"$probe_json")" == true ]]; then
+            break
+        fi
+        [[ "$no_resolve" == false ]] || break
+        list_output=$(jq -r '.list.output' <<<"$probe_json")
+        soname=$(LC_ALL=C sed -n \
+            's/.*error while loading shared libraries: \([^:][^:]*\): cannot open shared object file.*/\1/p' \
+            <<<"$list_output" | LC_ALL=C tail -n 1)
+        if [[ -z "$soname" || "$soname" == */* ]]; then
+            echo "[glibcx] Error: loader failed without a safe missing SONAME to resolve." >&2
+            jq -r '
+                if .verify.exit_code != 0 then "  --verify: " + .verify.output else empty end,
+                if .list.exit_code != 0 then "  --list: " + .list.output else empty end,
+                .unexpected_resolutions[]? | "  " + .
+            ' <<<"$probe_json" >&2
             return 1
         fi
-        if library_path=$(_resolver_find_library "$soname" "$app_lib" "$profile_json" \
-            "$origin" "$target_inspection"); then
-            dso_inspection=$(elf_inspect "$library_path" dso)
-            [[ "$(jq -r '.valid' <<<"$dso_inspection")" == true ]] || return 1
-        else
-            if [[ "$no_resolve" == true ]]; then
-                continue
-            fi
-            if [[ -z "$snapshot_dir" ]]; then
-                snapshot_dir=$(_resolver_repository_snapshot "$offline" "$refresh") || return 1
-                refresh=false
-            fi
-            provider=$(_resolver_contents_provider "${snapshot_dir}/Contents-aarch64" "$soname") \
-                || return 1
-            package_json=$(_resolver_package_metadata "${snapshot_dir}/Packages" "$provider") \
-                || return 1
-            package_file=$(_resolver_download_package "$package_json" "$offline") || return 1
-            _resolver_copy_package_dso "$package_file" "$soname" "$app_lib" \
-                "$package_json" "$snapshot_dir" || return 1
-            library_path=$(_resolver_find_library "$soname" "$app_lib" "$profile_json" \
-                "$origin" "$target_inspection") || return 1
-            dso_inspection=$(elf_inspect "$library_path" dso)
+        if [[ -n "${attempted[$soname]:-}" ]]; then
+            echo "[glibcx] Error: loader still cannot resolve '$soname' after it was vendored." >&2
+            return 1
         fi
-        while IFS= read -r soname; do queue+=("$soname"); done \
-            < <(jq -r '.dynamic.needed[]' <<<"$dso_inspection")
+        attempted[$soname]=1
+        iteration=$((iteration + 1))
+        if (( iteration > 512 )); then
+            echo "[glibcx] Error: dependency closure exceeds 512 fetched SONAMEs." >&2
+            return 1
+        fi
+        if [[ -z "$snapshot_dir" ]]; then
+            snapshot_dir=$(_resolver_repository_snapshot "$offline" "$refresh") || return 1
+            refresh=false
+        fi
+        provider=$(_resolver_contents_provider "${snapshot_dir}/Contents-aarch64" "$soname") \
+            || return 1
+        package_json=$(_resolver_package_metadata "${snapshot_dir}/Packages" "$provider") \
+            || return 1
+        package_file=$(_resolver_download_package "$package_json" "$offline") || return 1
+        _resolver_copy_package_dso "$package_file" "$soname" "$app_lib" \
+            "$package_json" "$snapshot_dir" || return 1
+        [[ -f "${app_lib}/${soname}" ]] || {
+            echo "[glibcx] Error: repository package did not provide '$soname'." >&2
+            return 1
+        }
     done
     if [[ -f "$(dirname "$app_lib")/resolver-packages.json" ]]; then
         jq -c '.repository' "$(dirname "$app_lib")/resolver-packages.json"
@@ -621,7 +635,7 @@ _resolver_package_for_path() {
 resolver_manifest_dependencies() {
     local verification_json="$1" profile_json="$2" actual_app_lib="$3" manifest_app_lib="$4"
     local list_output soname manifest_path actual_path inspection package_record package_name package_version
-    local source_kind file_hash build_id needed_json entry_file provenance_file provenance_entry
+    local source_kind file_hash build_id needed_json entry_file loader_entries_file provenance_file provenance_entry
     local package_sha256 repository_snapshot_digest
     local profile_roots=()
 
@@ -635,8 +649,30 @@ resolver_manifest_dependencies() {
     done < <(jq -r '.library_dirs[]' <<<"$profile_json")
 
     entry_file=$(mktemp "${TMP_DIR}/dependency-lock.XXXXXX")
+    loader_entries_file=$(mktemp "${TMP_DIR}/dependency-loader-entries.XXXXXX")
     provenance_file="$(dirname "$actual_app_lib")/resolver-packages.json"
     : >"$entry_file"
+    : >"$loader_entries_file"
+    if jq -e '.audit != null' <<<"$verification_json" >/dev/null; then
+        while IFS= read -r actual_path; do
+            [[ -n "$actual_path" ]] || continue
+            [[ "$actual_path" != linux-vdso.so.* ]] || continue
+            if [[ "$actual_path" != /* ]]; then
+                echo "[glibcx] Error: audit reported a non-absolute loaded object: '$actual_path'." >&2
+                rm -f "$entry_file" "$loader_entries_file"
+                return 1
+            fi
+            manifest_path="$actual_path"
+            if [[ "$actual_path" == "$actual_app_lib" || "$actual_path" == "${actual_app_lib}/"* ]]; then
+                manifest_path="${manifest_app_lib}${actual_path#"$actual_app_lib"}"
+            fi
+            printf '%s\t%s\n' "$(basename "$actual_path")" "$manifest_path" \
+                >>"$loader_entries_file"
+        done < <(jq -r '.audit.opened[]
+            | select(.lmid == "0000000000000000") | .path' <<<"$verification_json")
+    else
+        _resolver_loader_entries <<<"$list_output" >"$loader_entries_file"
+    fi
     while IFS=$'\t' read -r soname manifest_path; do
         [[ -n "$soname" && -n "$manifest_path" ]] || continue
         actual_path="$manifest_path"
@@ -645,16 +681,18 @@ resolver_manifest_dependencies() {
         fi
         if [[ ! -f "$actual_path" ]]; then
             echo "[glibcx] Error: loader resolved '$soname' to missing file '$actual_path'." >&2
-            rm -f "$entry_file"
+            rm -f "$entry_file" "$loader_entries_file"
             return 1
         fi
 
         inspection=$(elf_inspect "$actual_path" dso)
         if [[ "$(jq -r '.valid' <<<"$inspection")" != "true" ]]; then
             echo "[glibcx] Error: resolved dependency '$actual_path' is not a valid AArch64 DSO." >&2
-            rm -f "$entry_file"
+            rm -f "$entry_file" "$loader_entries_file"
             return 1
         fi
+        soname=$(jq -r --arg fallback "$(basename "$actual_path")" \
+            '.dynamic.soname // $fallback' <<<"$inspection")
         file_hash=$(_sha256_file "$actual_path")
         build_id=$(jq -r '.notes.build_id // empty' <<<"$inspection")
         needed_json=$(jq -c '.dynamic.needed' <<<"$inspection")
@@ -706,10 +744,10 @@ resolver_manifest_dependencies() {
                 needed: $needed,
                 status: "resolved"
             }' >>"$entry_file"
-    done < <(_resolver_loader_entries <<<"$list_output")
+    done <"$loader_entries_file"
 
     jq -s 'unique_by(.path) | sort_by(.soname, .path)' "$entry_file"
-    rm -f "$entry_file"
+    rm -f "$entry_file" "$loader_entries_file"
 }
 
 cmd_deps() {

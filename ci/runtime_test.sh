@@ -40,9 +40,11 @@ RUNTIME_ROOT="${TEST_TMP_DIR}/managed-runtimes"
 if [[ -x "${PREFIX:-/nonexistent}/glibc/lib/ld-linux-aarch64.so.1" ]]; then
     source_loader="${PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
     source_libc="${PREFIX}/glibc/lib/libc.so.6"
+    fixture_sysroot="${PREFIX}/glibc"
 else
     source_loader=$(find /lib /usr/lib -name ld-linux-aarch64.so.1 -type f -print -quit 2>/dev/null)
     source_libc=$(find /lib /usr/lib -name libc.so.6 -type f -print -quit 2>/dev/null)
+    fixture_sysroot=/
 fi
 [[ -n "$source_loader" && -n "$source_libc" ]] || fail "AArch64 glibc fixture is unavailable"
 
@@ -122,9 +124,13 @@ fixture_catalog_signature="${fixture_catalog}.asc"
 mkdir -p "${fixture_payload}/lib"
 cp "$source_loader" "${fixture_payload}/lib/ld-linux-aarch64.so.1"
 cp "$source_libc" "${fixture_payload}/lib/libc.so.6"
+fixture_audit="${fixture_payload}/lib/glibcx-loader-audit.so"
+bash profiles/build-loader-audit.sh \
+    "$fixture_sysroot" profiles/loader-audit.c "$fixture_audit"
 chmod 755 "${fixture_payload}/lib/ld-linux-aarch64.so.1" "${fixture_payload}/lib/libc.so.6"
 loader_hash=$(_sha256_file "${fixture_payload}/lib/ld-linux-aarch64.so.1")
 libc_hash=$(_sha256_file "${fixture_payload}/lib/libc.so.6")
+audit_hash=$(_sha256_file "$fixture_audit")
 provided_versions=$(LC_ALL=C strings "$source_libc" 2>/dev/null \
     | grep -oE 'GLIBC(_ABI)?_[A-Za-z0-9_.]+' | LC_ALL=C sort -uV | jq -Rsc 'split("\n") | map(select(length > 0))')
 jq -n \
@@ -134,11 +140,12 @@ jq -n \
     --arg library_dir "${fixture_final_dir}/lib" \
     --arg loader_hash "$loader_hash" \
     --arg libc_hash "$libc_hash" \
+    --arg audit_hash "$audit_hash" \
     --arg termux_prefix "${PREFIX:-/data/data/com.termux/files/usr}" \
     --argjson versions "$provided_versions" \
     '{
         schema: 1,
-        compatibility_schema: 1,
+        compatibility_schema: 2,
         profile_id: $id,
         kind: "managed",
         created_at: "2026-08-09T00:00:00Z",
@@ -162,9 +169,17 @@ jq -n \
         },
         provided_versions: $versions,
         allowed_tunables: [],
+        loader_audit: {
+            path: ($prefix + "/lib/glibcx-loader-audit.so"),
+            sha256: $audit_hash,
+            protocol: 1,
+            fd: 198
+        },
+        loader_policy: {glibc_hwcaps_mask: ""},
         files: [
             {path: "lib/ld-linux-aarch64.so.1", type: "file", sha256: $loader_hash, mode: "755"},
-            {path: "lib/libc.so.6", type: "file", sha256: $libc_hash, mode: "755"}
+            {path: "lib/libc.so.6", type: "file", sha256: $libc_hash, mode: "755"},
+            {path: "lib/glibcx-loader-audit.so", type: "file", sha256: $audit_hash, mode: "755"}
         ]
     }' >"${fixture_payload}/profile.json"
 GNUPGHOME="$fixture_gnupg" gpg --batch --yes --armor --detach-sign \
@@ -175,7 +190,7 @@ GNUPGHOME="$fixture_gnupg" gpg --batch --yes --armor --detach-sign \
 bundle_hash=$(_sha256_file "$fixture_bundle")
 profile_hash=$(_sha256_file "${fixture_payload}/profile.json")
 catalog_published=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-catalog_expiry=$(date -u -d '+180 days' '+%Y-%m-%dT%H:%M:%SZ')
+catalog_expiry=$(date -u -d "${catalog_published} +180 days" '+%Y-%m-%dT%H:%M:%SZ')
 jq -n \
     --arg published "$catalog_published" \
     --arg expires "$catalog_expiry" \
@@ -193,7 +208,7 @@ jq -n \
         expires_at: $expires,
         min_glibcx_version: "0.3.0",
         signing_subkey_fingerprint: $signing_fingerprint,
-        profile_compatibility_schema: 1,
+        profile_compatibility_schema: 2,
         profiles: [{
             profile_id: $id,
             architecture: "aarch64",
@@ -233,7 +248,7 @@ if _runtime_profile_manifest_validate "${TEST_TMP_DIR}/unsafe-profile.json" \
 fi
 pass "managed profile canonical-path enforcement"
 
-jq '.compatibility_schema = 2' \
+jq '.compatibility_schema = 1' \
     "${fixture_payload}/profile.json" >"${TEST_TMP_DIR}/wrong-profile-schema.json"
 if _runtime_profile_manifest_validate "${TEST_TMP_DIR}/wrong-profile-schema.json" \
     "$fixture_profile_id" "$fixture_final_dir" >/dev/null 2>&1; then

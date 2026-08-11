@@ -14,7 +14,7 @@ PROFILE_STATE_DIR="${CLI_STORAGE}/profiles"
 RUNTIME_ROOT="${PREFIX:-/data/data/com.termux/files/usr}/opt/glibcx/runtimes"
 STATE_SCHEMA=3
 GLIBCX_VERSION="0.3.0-dev"
-PROFILE_COMPATIBILITY_SCHEMA=1
+PROFILE_COMPATIBILITY_SCHEMA=2
 
 # Release trust is pinned to the public key produced by the offline production
 # ceremony. Fixture tests override these shell variables only after sourcing

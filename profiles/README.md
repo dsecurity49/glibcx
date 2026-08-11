@@ -1,7 +1,7 @@
-# Building a managed runtime
+# Building and signing a managed runtime
 
-This directory contains the scripts and pinned inputs used to build a glibcx
-runtime release.
+This directory contains the scripts, contracts, and pinned inputs used to build
+a managed glibcx runtime and attach it to a signed release.
 
 ## Why the final path matters
 
@@ -35,12 +35,16 @@ Regular files in a profile use mode `0644` or `0755`. Symlinks must resolve
 inside the profile. The `/proc/self/exe` shim is built as a glibc DSO in the
 same pinned builder as glibc and included in the signed inventory. It supports
 self-inspecting executables such as PyInstaller bundles.
+The dependency-free loader-audit module is built there too. Compatibility
+schema 2 records its signed path, hash, protocol, reserved descriptor, and the
+runtime's glibc-hwcaps policy. Older or incomplete profiles fail validation.
 
 `prepare-profile.sh` inventories an unsigned payload. `package-release.sh`
-adds the corresponding-source bundle and creates the ten signed release assets.
-Neither script creates or imports production key material.
+adds corresponding source and assembles the ten release assets; the binary,
+catalog, runtime bundle, and source bundle each receive detached signatures.
+Neither script creates or imports real release key material.
 
-## Key boundary
+## Keep the primary key offline
 
 Create the primary release key offline by following
 [`keys/CEREMONY.md`](../keys/CEREMONY.md). GitHub receives only the encrypted
@@ -49,62 +53,91 @@ revocation certificate never enter CI.
 
 ## Build the runtime
 
-After the final candidate passes CI, dispatch
-`.github/workflows/runtime-profile.yml` with:
+After the commit intended for the tag passes CI and the physical-device check,
+dispatch `.github/workflows/runtime-profile.yml` with:
 
-- the intended production tag;
+- the intended release tag;
 - the candidate's full 40-character commit in `candidate_commit`;
 - a new profile ID;
 - a fixed reproducible timestamp as `source_date_epoch`; and
 - the builder image already pinned in `runtime-source.lock.json`.
 
-The workflow builds for the final prefix, verifies the GNU source archive,
-records its inputs, prepares the inventory, and uploads the
-`glibcx-runtime-profile` artifact. This pre-tag build prevents a broken
-runtime build from consuming a production version. After it succeeds, create
-the annotated tag at that exact commit. The protected release workflow rejects
-the artifact if the tag points anywhere else. Reuse the same source timestamp
-when dispatching the protected release.
+For example:
+
+```bash
+tag=v0.3.0
+candidate_commit=$(git rev-parse HEAD)
+profile_id=glibcx-glibc-2.43-1
+source_date_epoch=$(git show -s --format=%ct "$candidate_commit")
+builder_image=$(jq -r '.builder_image' profiles/runtime-source.lock.json)
+
+gh workflow run runtime-profile.yml \
+  -f tag="$tag" \
+  -f candidate_commit="$candidate_commit" \
+  -f profile_id="$profile_id" \
+  -f source_date_epoch="$source_date_epoch" \
+  -f builder_image="$builder_image"
+```
+
+The workflow builds directly for the final install prefix, verifies the GNU
+source archive, records every pinned input, and uploads the
+`glibcx-runtime-profile` artifact. Inspect the completed run before creating an
+annotated tag at the same commit. The release workflow rejects an artifact or
+tag that points elsewhere. Reuse the same source timestamp for publication.
 
 For a deliberate post-tag rebuild, leave `candidate_commit` empty; the workflow
 then requires the named tag to be annotated.
 
-Before tagging, the final candidate must pass `ci/android_device_matrix.sh` on
-at least one physical AArch64 Termux device available to the maintainer.
-Additional Android versions, vendors, and page sizes are valuable published
-evidence, not mandatory release blockers.
+Before tagging, run `bash ci/android_device_matrix.sh` on at least one physical
+AArch64 Termux device available to the maintainer. Additional Android versions,
+vendors, and page sizes are useful evidence, not release blockers.
 
 ## Stage and publish the release
 
-Dispatch `.github/workflows/release.yml` with the successful profile-build run
-ID, artifact name, next catalog version, and the same source timestamp. For a
-production release, set `publish` to `true` in this single dispatch.
+Create and push the annotated tag only after the profile build succeeds. Then
+dispatch `.github/workflows/release.yml` with that build's run ID, the next
+monotonically increasing catalog version, and the same timestamp:
+
+```bash
+git tag -a "$tag" "$candidate_commit" -m "glibcx ${tag#v}"
+git push origin "$tag"
+
+gh workflow run release.yml \
+  -f tag="$tag" \
+  -f profile_run_id='<successful-run-id>' \
+  -f profile_artifact=glibcx-runtime-profile \
+  -f catalog_version='<next-integer>' \
+  -f source_date_epoch="$source_date_epoch" \
+  -f publish=true
+```
+
+For a real release, use one `publish=true` dispatch. A rehearsal cannot be
+turned into a release later.
 
 The protected jobs then:
 
 1. check the tag, version, public key, fingerprints, source, and provenance;
 2. import the protected signing subkey;
-3. build, sign, and independently verify all ten assets;
+3. build all ten assets, sign the four release payloads, and verify the
+   complete set independently;
 4. create attestations and upload a complete draft release; and
 5. compare the uploaded digests with the verified local files.
 
 After verification, the publish job waits for a second `production-release`
-environment approval. Inspect the complete draft at that pause, then approve or
-reject publication. Do not try to resume a `publish=false` run with a second
-dispatch: the new run correctly refuses to replace the existing draft.
+environment approval. That pause is the point to inspect the draft and either
+approve it or stop the release.
 
 If any asset needs to change, reject publication and make a new version and
 tag; do not replace an asset in place. Publication checks that GitHub locked the
-release and that every asset still matches its attestation. `publish=false`
-exists only for non-production workflow rehearsals whose draft and tag will not
-be reused.
+release and that every asset still matches its attestation. Use `publish=false`
+only for workflow rehearsals whose draft and tag will not be reused.
 
-The repository variables are:
+Required repository variables:
 
 - `GLIBCX_RELEASE_PRIMARY_FINGERPRINT`
 - `GLIBCX_RELEASE_SIGNING_FINGERPRINT`
 
-The `production-release` environment secrets are:
+Required `production-release` environment secrets:
 
 - `GLIBCX_RELEASE_SIGNING_SUBKEY_B64`
 - `GLIBCX_RELEASE_SIGNING_PASSPHRASE`

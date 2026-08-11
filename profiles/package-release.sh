@@ -169,7 +169,7 @@ jq -n \
         expires_at: $expires_at,
         min_glibcx_version: $min_glibcx_version,
         signing_subkey_fingerprint: $signing_subkey_fingerprint,
-        profile_compatibility_schema: 1,
+        profile_compatibility_schema: 2,
         profiles: [{
             profile_id: $profile_id,
             architecture: "aarch64",

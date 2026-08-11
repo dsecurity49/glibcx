@@ -317,6 +317,15 @@ _runtime_profile_manifest_validate() {
         and (.provided_versions | type) == "array"
         and (.allowed_tunables | type) == "array"
         and all(.allowed_tunables[]; test("^[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+$"))
+        and (.loader_audit.path | under_prefix)
+        and (.loader_audit.sha256 | test("^[0-9a-f]{64}$"))
+        and .loader_audit.protocol == 1
+        and .loader_audit.fd == 198
+        and ((.loader_audit.path | ltrimstr($prefix + "/")) as $audit_path
+            | .loader_audit.sha256 as $audit_hash
+            | any(.files[]; .type == "file" and .path == $audit_path
+                and .sha256 == $audit_hash and .mode == "755"))
+        and (.loader_policy.glibc_hwcaps_mask | type) == "string"
         and (.termux.package_name | type) == "string"
         and (.termux.prefix | type) == "string"
         and (.termux.package_revision | type) == "string"
