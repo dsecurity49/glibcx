@@ -166,7 +166,14 @@ cmd_vendor() {
         lock_release "$target_lock"
         exit 1
     fi
-    chmod 600 "${stage_root}/manifest.json" "${stage_root}/resolution.txt"
+    if ! chmod 600 "${stage_root}/manifest.json" "${stage_root}/resolution.txt"; then
+        echo "[glibcx] Error: failed to restrict staged state files." >&2
+        rm -rf "${stage_root:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        exit 1
+    fi
 
     generation_dir="${app_root}/generations/${generation_number}"
     if ! mv "$stage_root" "$generation_dir"; then
