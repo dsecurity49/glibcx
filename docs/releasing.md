@@ -158,7 +158,7 @@ The runtime is built before the production tag so a failed runtime build does
 not consume a version. Use one timestamp for the runtime and release workflows:
 
 ```bash
-tag=v0.3.0
+tag=v0.3.1
 candidate_commit=$(git rev-parse HEAD)
 profile_id=glibcx-glibc-2.43-1
 source_date_epoch=$(git show -s --format=%ct "$candidate_commit")

@@ -18,7 +18,7 @@ PRoot or another full environment.
 
 ## Installing
 
-The signed installation format begins with v0.3.0. The commands below will
+The signed installation format begins with v0.3.1. The commands below will
 work once that release appears on the
 [release page](https://github.com/dsecurity49/glibcx/releases). They download
 the installer and public key from one versioned release, compare the key with a
@@ -28,7 +28,7 @@ it.
 ```bash
 pkg install -y curl gnupg
 
-tag=v0.3.0
+tag=v0.3.1
 base="https://github.com/dsecurity49/glibcx/releases/download/${tag}"
 curl -fLO "$base/glibcx-release.gpg"
 curl -fLO "$base/install.sh"
