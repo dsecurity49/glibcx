@@ -51,6 +51,12 @@ grep -Fq 'cd "$glibc_tree"' <<<"$run_in_builder_body" \
     || fail "not every managed runtime container invocation uses its repository root"
 pass "managed runtime container invocations use the pinned builder root"
 
+for dso_builder in profiles/build-proc-exe-shim.sh profiles/build-loader-audit.sh; do
+    grep -Fq 'command -v aarch64-linux-gnu-gcc' "$dso_builder" \
+        || fail "$dso_builder cannot use the pinned CGCT image compiler"
+done
+pass "managed runtime DSO builders support the pinned CGCT compiler"
+
 if [[ -x "${PREFIX:-/nonexistent}/glibc/lib/ld-linux-aarch64.so.1" ]]; then
     source_loader="${PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
     source_libc="${PREFIX}/glibc/lib/libc.so.6"

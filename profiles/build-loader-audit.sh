@@ -17,17 +17,23 @@ output_file="$3"
 }
 [[ -f "$source_file" ]] \
     || { echo "[loader-audit] Error: source file is missing." >&2; exit 1; }
-command -v clang >/dev/null 2>&1 \
-    || { echo "[loader-audit] Error: clang is missing from the builder." >&2; exit 1; }
+if command -v clang >/dev/null 2>&1; then
+    compiler=(clang --target=aarch64-linux-gnu)
+elif command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    compiler=(aarch64-linux-gnu-gcc)
+else
+    echo "[loader-audit] Error: no AArch64 C compiler is available." >&2
+    exit 1
+fi
 
 object_file=$(mktemp "${TMPDIR:-/tmp}/glibcx-loader-audit.XXXXXX.o")
 cleanup() { rm -f "${object_file:?}"; }
 trap cleanup EXIT
 
-clang --target=aarch64-linux-gnu --sysroot="$sysroot" \
+"${compiler[@]}" --sysroot="$sysroot" \
     -fPIC -ffreestanding -fno-stack-protector -O2 -Wall -Wextra -Werror \
     -c "$source_file" -o "$object_file"
-clang --target=aarch64-linux-gnu --sysroot="$sysroot" \
+"${compiler[@]}" --sysroot="$sysroot" \
     -shared -nostdlib -Wl,-z,defs -Wl,-soname,glibcx-loader-audit.so \
     "$object_file" -o "$output_file"
 

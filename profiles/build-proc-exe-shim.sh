@@ -28,10 +28,16 @@ done
 }
 [[ -f "$source_file" ]] \
     || { echo "[proc-shim] Error: source file is missing." >&2; exit 1; }
-command -v clang >/dev/null 2>&1 \
-    || { echo "[proc-shim] Error: clang is missing from the builder." >&2; exit 1; }
+if command -v clang >/dev/null 2>&1; then
+    compiler=(clang --target=aarch64-linux-gnu)
+elif command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    compiler=(aarch64-linux-gnu-gcc)
+else
+    echo "[proc-shim] Error: no AArch64 C compiler is available." >&2
+    exit 1
+fi
 
-clang --target=aarch64-linux-gnu --sysroot="$sysroot" \
+"${compiler[@]}" --sysroot="$sysroot" \
     -shared -fPIC -nostdlib -O2 -Wall -Wextra -Werror \
     "$source_file" "$libc_path" \
     -Wl,-soname,glibcx-proc-exe-shim.so -o "$output_file"
