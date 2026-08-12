@@ -72,10 +72,13 @@ for build_item in build-package.sh clean.sh packages x11-packages root-packages 
     cp -a "${termux_tree}/${build_item}" "$glibc_tree/"
 done
 
+builder_container=glibcx-runtime-builder
+
 run_in_builder() {
     (
         cd "$glibc_tree"
-        TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
+        CONTAINER_NAME="$builder_container" \
+            TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
             ./scripts/run-docker.sh "$@"
     )
 }
@@ -122,20 +125,21 @@ prepared_tree="${package_root}/${final_prefix#/}"
 # Build this DSO in the same digest-pinned container as glibc. Keeping the
 # extracted sysroot below glibc_tree makes the exact tree visible in that
 # container without adding a second mutable toolchain.
-module_output="${glibc_tree}/.glibcx-module-output"
-mkdir -m 0777 "$module_output"
-proc_shim="${module_output}/proc-exe-shim.so"
-loader_audit="${module_output}/loader-audit.so"
+proc_shim="${glibc_tree}/.glibcx-proc-exe-shim.so"
+loader_audit="${glibc_tree}/.glibcx-loader-audit.so"
 cp profiles/proc-exe-shim.c "${glibc_tree}/.glibcx-proc-exe-shim.c"
 cp profiles/build-proc-exe-shim.sh "${glibc_tree}/.glibcx-build-proc-exe-shim.sh"
 container_root=/home/builder/termux-packages
-container_module_output="${container_root}/.glibcx-module-output"
+container_module_root=/home/builder/.termux-build
 container_sysroot="${container_root}/${package_root#${glibc_tree}/}/${final_prefix#/}"
 run_in_builder bash \
     "${container_root}/.glibcx-build-proc-exe-shim.sh" \
     "$container_sysroot" \
     "${container_root}/.glibcx-proc-exe-shim.c" \
-    "${container_module_output}/proc-exe-shim.so"
+    "${container_module_root}/.glibcx-proc-exe-shim.so"
+docker cp \
+    "${builder_container}:${container_module_root}/.glibcx-proc-exe-shim.so" \
+    "$proc_shim"
 [[ -f "$proc_shim" ]] \
     || { echo "[profile-build] Error: proc-exe shim build produced no DSO." >&2; exit 1; }
 cp profiles/loader-audit.c "${glibc_tree}/.glibcx-loader-audit.c"
@@ -144,10 +148,12 @@ run_in_builder bash \
     "${container_root}/.glibcx-build-loader-audit.sh" \
     "$container_sysroot" \
     "${container_root}/.glibcx-loader-audit.c" \
-    "${container_module_output}/loader-audit.so"
+    "${container_module_root}/.glibcx-loader-audit.so"
+docker cp \
+    "${builder_container}:${container_module_root}/.glibcx-loader-audit.so" \
+    "$loader_audit"
 [[ -f "$loader_audit" ]] \
     || { echo "[profile-build] Error: loader-audit build produced no DSO." >&2; exit 1; }
-chmod 0755 "$module_output"
 chmod 0644 "$proc_shim" "$loader_audit"
 
 source_tree="${build_root}/corresponding-source"
