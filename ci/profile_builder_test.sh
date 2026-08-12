@@ -43,6 +43,14 @@ patch --batch -d "$patch_fixture" -p1 \
     || fail "Linux-header install phase did not receive the native host environment"
 pass "Linux-header build and install phases use native host tools"
 
+run_in_builder_body=$(sed -n \
+    '/^run_in_builder()/,/^}/p' profiles/build-managed-runtime.sh)
+grep -Fq 'cd "$glibc_tree"' <<<"$run_in_builder_body" \
+    || fail "managed runtime container helper does not enter the pinned builder tree"
+[[ "$(grep -Fc 'run_in_builder ' profiles/build-managed-runtime.sh)" -eq 3 ]] \
+    || fail "not every managed runtime container invocation uses its repository root"
+pass "managed runtime container invocations use the pinned builder root"
+
 if [[ -x "${PREFIX:-/nonexistent}/glibc/lib/ld-linux-aarch64.so.1" ]]; then
     source_loader="${PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
     source_libc="${PREFIX}/glibc/lib/libc.so.6"

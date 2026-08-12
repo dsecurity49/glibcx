@@ -72,6 +72,14 @@ for build_item in build-package.sh clean.sh packages x11-packages root-packages 
     cp -a "${termux_tree}/${build_item}" "$glibc_tree/"
 done
 
+run_in_builder() {
+    (
+        cd "$glibc_tree"
+        TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
+            ./scripts/run-docker.sh "$@"
+    )
+}
+
 final_prefix="/data/data/com.termux/files/usr/opt/glibcx/runtimes/${PROFILE_ID}"
 properties_file="${glibc_tree}/scripts/properties.sh"
 grep -Fqx 'TERMUX__PREFIX_GLIBC_SUBDIR="glibc"' "$properties_file" \
@@ -92,12 +100,8 @@ grep -Fqx "TERMUX_PKG_SHA256=${source_sha256}" "$recipe"
 linux_headers_patch="profiles/patches/linux-api-headers-host-tools.patch"
 patch --batch --forward -d "$glibc_tree" -p1 <"$linux_headers_patch"
 
-(
-    cd "$glibc_tree"
-    TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
-        ./scripts/run-docker.sh ./build-package.sh \
-            -a aarch64 --format pacman --library glibc glibc
-)
+run_in_builder ./build-package.sh \
+    -a aarch64 --format pacman --library glibc glibc
 
 package_root="${glibc_tree}/.glibcx-package-root"
 mkdir -p "$package_root"
@@ -124,22 +128,20 @@ cp profiles/proc-exe-shim.c "${glibc_tree}/.glibcx-proc-exe-shim.c"
 cp profiles/build-proc-exe-shim.sh "${glibc_tree}/.glibcx-build-proc-exe-shim.sh"
 container_root=/home/builder/termux-packages
 container_sysroot="${container_root}/${package_root#${glibc_tree}/}/${final_prefix#/}"
-TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
-    "${glibc_tree}/scripts/run-docker.sh" bash \
-        "${container_root}/.glibcx-build-proc-exe-shim.sh" \
-        "$container_sysroot" \
-        "${container_root}/.glibcx-proc-exe-shim.c" \
-        "${container_root}/.glibcx-proc-exe-shim.so"
+run_in_builder bash \
+    "${container_root}/.glibcx-build-proc-exe-shim.sh" \
+    "$container_sysroot" \
+    "${container_root}/.glibcx-proc-exe-shim.c" \
+    "${container_root}/.glibcx-proc-exe-shim.so"
 [[ -f "$proc_shim" ]] \
     || { echo "[profile-build] Error: proc-exe shim build produced no DSO." >&2; exit 1; }
 cp profiles/loader-audit.c "${glibc_tree}/.glibcx-loader-audit.c"
 cp profiles/build-loader-audit.sh "${glibc_tree}/.glibcx-build-loader-audit.sh"
-TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
-    "${glibc_tree}/scripts/run-docker.sh" bash \
-        "${container_root}/.glibcx-build-loader-audit.sh" \
-        "$container_sysroot" \
-        "${container_root}/.glibcx-loader-audit.c" \
-        "${container_root}/.glibcx-loader-audit.so"
+run_in_builder bash \
+    "${container_root}/.glibcx-build-loader-audit.sh" \
+    "$container_sysroot" \
+    "${container_root}/.glibcx-loader-audit.c" \
+    "${container_root}/.glibcx-loader-audit.so"
 [[ -f "$loader_audit" ]] \
     || { echo "[profile-build] Error: loader-audit build produced no DSO." >&2; exit 1; }
 
