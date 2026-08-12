@@ -2,9 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-
-This is the upcoming v0.3 release.
+## [v0.3.0] - 2026-08-12
 
 ### Highlights
 
