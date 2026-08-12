@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible managed-runtime payload preparation and inventory tests.
 set -euo pipefail
+REPO_ROOT=$(pwd)
 
 pass() { printf '  PASS %s\n' "$*"; }
 fail() { printf '  FAIL %s\n' "$*" >&2; exit 1; }
@@ -65,6 +66,12 @@ for dso_builder in profiles/build-proc-exe-shim.sh profiles/build-loader-audit.s
 done
 pass "managed runtime DSO builders support the pinned CGCT compiler"
 
+grep -Fq -- '--slurpfile files "$files_json_file"' profiles/prepare-profile.sh \
+    || fail "profile inventory is passed through the process argument list"
+grep -Fq -- '--slurpfile versions "$versions_json_file"' profiles/prepare-profile.sh \
+    || fail "profile versions are passed through the process argument list"
+pass "large profile metadata uses file-backed jq inputs"
+
 if [[ -x "${PREFIX:-/nonexistent}/glibc/lib/ld-linux-aarch64.so.1" ]]; then
     source_loader="${PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
     source_libc="${PREFIX}/glibc/lib/libc.so.6"
@@ -90,13 +97,19 @@ bash profiles/build-loader-audit.sh \
     || fail "loader-audit fixture build failed"
 
 prepared_tree="${TEST_TMP_DIR}/prepared"
-mkdir -p "${prepared_tree}/lib" "${prepared_tree}/share/glibcx"
+mkdir -p "${prepared_tree}/bin" "${prepared_tree}/lib/getconf" \
+    "${prepared_tree}/lib/nested" "${prepared_tree}/share/locale/glibcx" \
+    "${prepared_tree}/share/doc/glibcx"
 cp "$source_loader" "${prepared_tree}/lib/ld-linux-aarch64.so.1"
 cp "$source_libc" "${prepared_tree}/lib/libc.so.6"
 printf 'not shipped\n' >"${prepared_tree}/lib/libc.a"
-printf '#!/bin/sh\nexit 0\n' >"${prepared_tree}/share/glibcx/helper"
-chmod 755 "${prepared_tree}/share/glibcx/helper"
+printf '#!/bin/sh\nexit 0\n' >"${prepared_tree}/share/locale/glibcx/helper"
+chmod 755 "${prepared_tree}/share/locale/glibcx/helper"
+printf '#!/bin/sh\nexit 0\n' >"${prepared_tree}/bin/getconf"
+printf 'not part of runtime\n' >"${prepared_tree}/share/doc/glibcx/README"
 ln -s libc.so.6 "${prepared_tree}/lib/libc-fixture.so"
+ln -s ../libc.so.6 "${prepared_tree}/lib/nested/libc-parent.so"
+ln -s ../../bin/getconf "${prepared_tree}/lib/getconf/POSIX_V7_LP64_OFF64"
 
 final_prefix="${TEST_TMP_DIR}/installed/builder-fixture"
 build_payload() {
@@ -113,7 +126,7 @@ build_payload() {
         LOADER_AUDIT_BINARY="$loader_audit" \
         TERMUX_INSTALL_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}" \
         SOURCE_DATE_EPOCH=1767225600 \
-        bash profiles/prepare-profile.sh \
+        bash "${REPO_ROOT}/profiles/prepare-profile.sh" \
             builder-fixture "$input_tree" "$final_prefix" "$output_dir" >/dev/null
 }
 
@@ -127,8 +140,12 @@ second_payload="${TEST_TMP_DIR}/second/builder-fixture.payload"
 cmp "${first_payload}/profile.json" "${second_payload}/profile.json" >/dev/null \
     || fail "identical inputs did not produce an identical profile manifest"
 [[ ! -e "${first_payload}/lib/libc.a" ]] || fail "SDK archive leaked into runtime payload"
-[[ "$(stat -c '%a' "${first_payload}/share/glibcx/helper")" == 755 ]] \
+[[ "$(stat -c '%a' "${first_payload}/share/locale/glibcx/helper")" == 755 ]] \
     || fail "executable payload mode was not preserved"
+[[ "$(readlink "${first_payload}/lib/nested/libc-parent.so")" == ../libc.so.6 ]] \
+    || fail "contained parent-relative symlink was not preserved"
+[[ ! -e "${first_payload}/lib/getconf" && ! -e "${first_payload}/share/doc" ]] \
+    || fail "command-support or documentation files leaked into runtime payload"
 [[ -f "${first_payload}/lib/glibcx-proc-exe-shim.so" ]] \
     || fail "proc-exe shim was not included in the payload"
 jq -e '.proc_exe_shim.path
@@ -151,7 +168,26 @@ _runtime_profile_manifest_validate \
 checked=$(_runtime_inventory_verify "$first_payload" "${first_payload}/profile.json") \
     || fail "prepared profile inventory failed verification"
 [[ "$checked" -ge 4 ]] || fail "prepared profile inventory was unexpectedly small"
+(
+    cd "$TEST_TMP_DIR"
+    _runtime_inventory_verify first/builder-fixture.payload \
+        first/builder-fixture.payload/profile.json >/dev/null
+) || fail "relative profile paths failed inventory verification"
+chmod 744 "${first_payload}/share/locale/glibcx/helper"
+if _runtime_inventory_verify "$first_payload" "${first_payload}/profile.json" \
+    >/dev/null 2>&1; then
+    fail "noncanonical executable mode passed inventory verification"
+fi
+chmod 755 "${first_payload}/share/locale/glibcx/helper"
 pass "profile schema and complete inventory"
+
+(
+    cd "$TEST_TMP_DIR"
+    build_payload relative-output
+) || fail "relative profile output path was rejected"
+[[ -f "${TEST_TMP_DIR}/relative-output/builder-fixture.payload/profile.json" ]] \
+    || fail "relative profile output was not created"
+pass "relative output path canonicalization"
 
 unsafe_tree="${TEST_TMP_DIR}/unsafe"
 cp -a "$prepared_tree" "$unsafe_tree"
@@ -160,6 +196,22 @@ if build_payload "${TEST_TMP_DIR}/unsafe-output" "$unsafe_tree" 2>/dev/null; the
     fail "absolute symlink target was accepted"
 fi
 pass "unsafe symlink rejection"
+
+escaping_tree="${TEST_TMP_DIR}/escaping"
+cp -a "$prepared_tree" "$escaping_tree"
+ln -s ../../outside "${escaping_tree}/lib/nested/escape.so"
+if build_payload "${TEST_TMP_DIR}/escaping-output" "$escaping_tree" 2>/dev/null; then
+    fail "parent-relative escaping symlink was accepted"
+fi
+pass "parent-relative symlink escape rejection"
+
+dangling_tree="${TEST_TMP_DIR}/dangling"
+cp -a "$prepared_tree" "$dangling_tree"
+ln -s missing.so "${dangling_tree}/lib/dangling.so"
+if build_payload "${TEST_TMP_DIR}/dangling-output" "$dangling_tree" 2>/dev/null; then
+    fail "dangling runtime symlink was accepted"
+fi
+pass "dangling symlink rejection"
 
 unsafe_name_tree="${TEST_TMP_DIR}/unsafe-name"
 cp -a "$prepared_tree" "$unsafe_name_tree"

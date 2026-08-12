@@ -48,8 +48,17 @@ source_sha256=$(read_lock source_sha256)
 output_parent=$(dirname "$OUTPUT_DIR")
 output_name=$(basename "$OUTPUT_DIR")
 mkdir -p "$output_parent"
+output_parent=$(realpath -e "$output_parent")
+OUTPUT_DIR="${output_parent}/${output_name}"
 build_root=$(mktemp -d "${output_parent}/.managed-runtime.XXXXXX")
-cleanup() { rm -rf "${build_root:?}"; }
+builder_container=""
+cleanup() {
+    if [[ -n "$builder_container" ]] \
+        && docker container inspect "$builder_container" >/dev/null 2>&1; then
+        docker rm -f "$builder_container" >/dev/null 2>&1 || true
+    fi
+    rm -rf "${build_root:?}"
+}
 trap cleanup EXIT
 
 clone_pinned() {
@@ -72,7 +81,7 @@ for build_item in build-package.sh clean.sh packages x11-packages root-packages 
     cp -a "${termux_tree}/${build_item}" "$glibc_tree/"
 done
 
-builder_container=glibcx-runtime-builder
+builder_container="glibcx-runtime-builder-${BASHPID}"
 
 run_in_builder() {
     (

@@ -1,9 +1,6 @@
 --- a/gpkg/linux-api-headers/build.sh
 +++ b/gpkg/linux-api-headers/build.sh
-@@ -17,7 +17,14 @@ termux_step_make() {
- }
- 
- termux_step_make_install() {
+@@ -20 +20,8 @@
 -	make -C "${TERMUX_PKG_SRCDIR}" INSTALL_HDR_PATH="${TERMUX__PREFIX__INCLUDE_DIR}" ARCH="${LINUX_ARCH}" headers_install
 +	(
 +		if [ "$TERMUX_ON_DEVICE_BUILD" = "false" ]; then
@@ -13,5 +10,3 @@
 +		make -C "${TERMUX_PKG_SRCDIR}" \
 +			INSTALL_HDR_PATH="${TERMUX__PREFIX__INCLUDE_DIR}" ARCH="${LINUX_ARCH}" headers_install
 +	)
- 	rm -r "${TERMUX__PREFIX__INCLUDE_DIR}/drm"
- }

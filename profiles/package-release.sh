@@ -57,10 +57,13 @@ case "$PROFILE_SECURITY_STATE" in recommended|supported|deprecated) ;; *) usage 
 [[ -f "$GLIBCX_BINARY" && -f "$INSTALLER_SCRIPT" && -f "${PAYLOAD_DIR}/profile.json" ]] \
     || { echo "[release] Error: binary, installer, or prepared profile manifest is missing." >&2; exit 1; }
 
-for release_command in gpg jq tar xz sha256sum; do
+for release_command in gpg jq realpath tar xz sha256sum; do
     command -v "$release_command" >/dev/null 2>&1 \
         || { echo "[release] Error: required command '$release_command' is unavailable." >&2; exit 1; }
 done
+
+PAYLOAD_DIR=$(realpath -e "$PAYLOAD_DIR")
+SOURCE_DIR=$(realpath -e "$SOURCE_DIR")
 
 secret_fingerprints=$(LC_ALL=C gpg --batch --with-colons --list-secret-keys "$SIGNING_KEY_FINGERPRINT" 2>/dev/null \
     | awk -F: '$1 == "fpr" {print toupper($10)}')
@@ -86,6 +89,8 @@ expected_source_url="${RELEASE_BASE_URL}/${source_name}"
 output_parent=$(dirname "$OUTPUT_DIR")
 output_name=$(basename "$OUTPUT_DIR")
 mkdir -p "$output_parent"
+output_parent=$(realpath -e "$output_parent")
+OUTPUT_DIR="${output_parent}/${output_name}"
 release_stage=$(mktemp -d "${output_parent}/.release-assets.XXXXXX")
 profile_stage=$(mktemp -d "${output_parent}/.profile-bundle.XXXXXX")
 cleanup() {

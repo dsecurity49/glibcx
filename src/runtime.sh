@@ -309,6 +309,9 @@ _runtime_profile_manifest_validate() {
             and (if .type == "file"
                  then (.sha256 | test("^[0-9a-f]{64}$")) and (.mode | test("^(644|755)$"))
                  else (.target | type) == "string"
+                    and (.target | length) > 0
+                    and (.target | startswith("/") | not)
+                    and (.target | test("[\\t\\r\\n]") | not)
                  end)
         )
         and (.loader as $loader
@@ -362,83 +365,100 @@ _runtime_profile_manifest_validate() {
 
 _runtime_inventory_verify() {
     local profile_root="$1" profile_file="$2"
-    local record relative_path entry_type expected actual mode target resolved
-    local expected_paths actual_paths
-    expected_paths=$(mktemp "${TMP_DIR}/profile-expected.XXXXXX")
-    actual_paths=$(mktemp "${TMP_DIR}/profile-actual.XXXXXX")
-    jq -r '.files[].path' "$profile_file" | LC_ALL=C sort >"$expected_paths"
+    local hash_record absolute_path relative_path mode target resolved
+    local expected_records actual_records actual_hashes
+    local -A actual_modes=()
+    profile_root=$(realpath -e "$profile_root") || {
+        echo "[glibcx] Error: managed-profile root cannot be canonicalized." >&2
+        return 1
+    }
+    profile_file=$(realpath -e "$profile_file") || {
+        echo "[glibcx] Error: managed-profile manifest cannot be canonicalized." >&2
+        return 1
+    }
+    expected_records=$(mktemp "${TMP_DIR}/profile-expected.XXXXXX")
+    actual_records=$(mktemp "${TMP_DIR}/profile-actual.XXXXXX")
+    actual_hashes=$(mktemp "${TMP_DIR}/profile-hashes.XXXXXX")
+    jq -r '.files[]
+        | if .type == "file"
+          then [.path, .type, .sha256, .mode]
+          else [.path, .type, .target, ""]
+          end | join("\t")' "$profile_file" | LC_ALL=C sort >"$expected_records"
+    : >"$actual_records"
 
-    while IFS= read -r record; do
-        relative_path=$(jq -r '.path' <<<"$record")
-        entry_type=$(jq -r '.type' <<<"$record")
-        if ! _runtime_safe_relative_path "$relative_path" \
-            || [[ "$relative_path" == "profile.json" || "$relative_path" == "profile.json.asc" \
-                || "$relative_path" == "manifest.json" ]]; then
-            echo "[glibcx] Error: unsafe managed-profile inventory path '$relative_path'." >&2
-            rm -f "$expected_paths" "$actual_paths"
+    while IFS= read -r -d '' absolute_path \
+        && IFS= read -r -d '' mode; do
+        actual_modes["$absolute_path"]="$mode"
+    done < <(find "$profile_root" -type f \
+        ! -path "${profile_root}/profile.json" \
+        ! -path "${profile_root}/profile.json.asc" \
+        ! -path "${profile_root}/manifest.json" -printf '%p\0%m\0')
+    find "$profile_root" -type f \
+        ! -path "${profile_root}/profile.json" \
+        ! -path "${profile_root}/profile.json.asc" \
+        ! -path "${profile_root}/manifest.json" -print0 \
+        | LC_ALL=C sort -z | xargs -0 -r sha256sum --zero >"$actual_hashes"
+    while IFS= read -r -d '' hash_record; do
+        absolute_path=${hash_record#*  }
+        relative_path=${absolute_path#"${profile_root}/"}
+        if ! _runtime_safe_relative_path "$relative_path"; then
+            echo "[glibcx] Error: unsafe managed-profile file path '$relative_path'." >&2
+            rm -f "$expected_records" "$actual_records" "$actual_hashes"
             return 1
         fi
-        if [[ "$entry_type" == "file" ]]; then
-            if [[ ! -f "${profile_root}/${relative_path}" || -L "${profile_root}/${relative_path}" ]]; then
-                echo "[glibcx] Error: managed-profile file is missing: $relative_path" >&2
-                rm -f "$expected_paths" "$actual_paths"
-                return 1
-            fi
-            expected=$(jq -r '.sha256' <<<"$record")
-            actual=$(_sha256_file "${profile_root}/${relative_path}")
-            mode=$(LC_ALL=C stat -c '%a' "${profile_root}/${relative_path}")
-            if [[ "$expected" != "$actual" || "$mode" != "$(jq -r '.mode' <<<"$record")" ]]; then
-                echo "[glibcx] Error: managed-profile file drift: $relative_path" >&2
-                echo "  expected sha256/mode: $expected $(jq -r '.mode' <<<"$record")" >&2
-                echo "  observed sha256/mode: $actual $mode" >&2
-                rm -f "$expected_paths" "$actual_paths"
-                return 1
-            fi
-        else
-            if [[ ! -L "${profile_root}/${relative_path}" ]]; then
-                echo "[glibcx] Error: managed-profile symlink is missing: $relative_path" >&2
-                rm -f "$expected_paths" "$actual_paths"
-                return 1
-            fi
-            target=$(readlink "${profile_root}/${relative_path}")
-            expected=$(jq -r '.target' <<<"$record")
-            resolved=$(realpath -m "$(dirname "${profile_root}/${relative_path}")/${target}")
-            if [[ "$target" != "$expected" || "$target" == /* \
-                || "$target" == *$'\n'* || "$target" == *$'\r'* ]] \
-                || [[ "$resolved" != "$profile_root" && "$resolved" != "${profile_root}/"* ]]; then
-                echo "[glibcx] Error: unsafe or drifted managed-profile symlink: $relative_path" >&2
-                rm -f "$expected_paths" "$actual_paths"
-                return 1
-            fi
-        fi
-    done < <(jq -c '.files[]' "$profile_file")
+        mode=${actual_modes["$absolute_path"]:-}
+        printf '%s\tfile\t%s\t%s\n' \
+            "$relative_path" "${hash_record%%  *}" "$mode" >>"$actual_records"
+    done <"$actual_hashes"
 
-    find "$profile_root" \( -type f -o -type l \) -print \
-        | sed "s|^${profile_root}/||" \
-        | grep -vE '^(profile[.]json([.]asc)?|manifest[.]json)$' \
-        | LC_ALL=C sort >"$actual_paths"
-    if ! cmp -s "$expected_paths" "$actual_paths"; then
-        echo "[glibcx] Error: managed-profile inventory has missing or unlisted files." >&2
-        diff -u "$expected_paths" "$actual_paths" >&2 || true
-        rm -f "$expected_paths" "$actual_paths"
+    while IFS= read -r -d '' absolute_path; do
+        relative_path=${absolute_path#"${profile_root}/"}
+        target=$(readlink "$absolute_path")
+        resolved=$(realpath -m "$(dirname "$absolute_path")/${target}")
+        if ! _runtime_safe_relative_path "$relative_path" \
+            || [[ -z "$target" || "$target" == /* \
+                || "$target" == *$'\t'* || "$target" == *$'\n'* || "$target" == *$'\r'* ]] \
+            || [[ "$resolved" != "$profile_root" && "$resolved" != "${profile_root}/"* ]] \
+            || [[ ! -e "$resolved" ]]; then
+            echo "[glibcx] Error: unsafe managed-profile symlink: $relative_path" >&2
+            rm -f "$expected_records" "$actual_records" "$actual_hashes"
+            return 1
+        fi
+        printf '%s\tsymlink\t%s\t\n' "$relative_path" "$target" >>"$actual_records"
+    done < <(find "$profile_root" -type l -print0 | LC_ALL=C sort -z)
+    LC_ALL=C sort -o "$actual_records" "$actual_records"
+
+    if ! cmp -s "$expected_records" "$actual_records"; then
+        echo "[glibcx] Error: managed-profile inventory is missing, unlisted, or drifted." >&2
+        diff -u "$expected_records" "$actual_records" >&2 || true
+        rm -f "$expected_records" "$actual_records" "$actual_hashes"
         return 1
     fi
-    actual=$(wc -l <"$actual_paths")
-    rm -f "$expected_paths" "$actual_paths"
-    printf '%s\n' "$actual"
+    relative_path=$(wc -l <"$actual_records")
+    rm -f "$expected_records" "$actual_records" "$actual_hashes"
+    printf '%s\n' "$relative_path"
 }
 
 _runtime_apply_inventory_modes() {
-    local profile_root="$1" profile_file="$2" record relative_path
-    while IFS= read -r record; do
-        relative_path=$(jq -r '.path' <<<"$record")
+    local profile_root="$1" profile_file="$2" relative_path mode
+    profile_root=$(realpath -e "$profile_root") || {
+        echo "[glibcx] Error: managed-profile root cannot be canonicalized." >&2
+        return 1
+    }
+    profile_file=$(realpath -e "$profile_file") || {
+        echo "[glibcx] Error: managed-profile manifest cannot be canonicalized." >&2
+        return 1
+    }
+    while IFS= read -r -d '' relative_path \
+        && IFS= read -r -d '' mode; do
         if [[ ! -f "${profile_root}/${relative_path}" \
             || -L "${profile_root}/${relative_path}" ]]; then
             echo "[glibcx] Error: refusing to chmod a missing or non-regular profile file: $relative_path" >&2
             return 1
         fi
-        chmod "$(jq -r '.mode' <<<"$record")" "${profile_root}/${relative_path}"
-    done < <(jq -c '.files[] | select(.type == "file")' "$profile_file")
+        chmod "$mode" "${profile_root}/${relative_path}"
+    done < <(jq -j '.files[] | select(.type == "file")
+        | .path, "\u0000", .mode, "\u0000"' "$profile_file")
 }
 
 _runtime_verify_managed_dir() {

@@ -104,8 +104,19 @@ jobs:
           jq -e --arg commit "$GLIBCX_COMMIT" \
             '.schema == 1 and .glibcx_commit == $commit' \
             glibcx-runtime-profile/build-metadata.json >/dev/null
-          test -s "glibcx-runtime-profile/payload/${PROFILE_ID}.payload/profile.json"
+          profile_root="glibcx-runtime-profile/payload/${PROFILE_ID}.payload"
+          profile_file="${profile_root}/profile.json"
+          test -s "$profile_file"
           test -d glibcx-runtime-profile/corresponding-source
+          source src/common.sh
+          source src/runtime.sh
+          TMP_DIR=$(mktemp -d)
+          cleanup() { rm -rf "${TMP_DIR:?}"; }
+          trap cleanup EXIT
+          expected_prefix=$(jq -r '.prefix' "$profile_file")
+          _runtime_profile_manifest_validate \
+            "$profile_file" "$PROFILE_ID" "$expected_prefix"
+          _runtime_inventory_verify "$profile_root" "$profile_file" >/dev/null
 
       - uses: actions/upload-artifact@v4
         with:
