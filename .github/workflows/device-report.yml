@@ -1,0 +1,236 @@
+name: Review device report
+
+on:
+  issues:
+    types: [opened]
+
+concurrency:
+  group: device-report-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: startsWith(github.event.issue.title, '[device test]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      accepted: ${{ steps.package.outputs.accepted }}
+      title: ${{ steps.package.outputs.title }}
+      body: ${{ steps.package.outputs.body }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_BODY: ${{ github.event.issue.body }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download and validate the attachment
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$ISSUE_BODY" >"$RUNNER_TEMP/issue-body.md"
+          if ! LC_ALL=C grep -Eq \
+              '^- \[[xX]\] I inspected the archive and am comfortable sharing its contents publicly[.]$' \
+              "$RUNNER_TEMP/issue-body.md"; then
+            printf '%s\n' \
+              'The required privacy confirmation was not checked.' \
+              >"$RUNNER_TEMP/rejection.txt"
+            echo "accepted=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t attachment_urls < <(
+            LC_ALL=C grep -Eo \
+              'https://github[.]com/user-attachments/files/[0-9]+/glibcx-device-report-[A-Za-z0-9._-]+[.]tar[.]gz' \
+              "$RUNNER_TEMP/issue-body.md" | LC_ALL=C sort -u
+          )
+          if [[ ${#attachment_urls[@]} -ne 1 ]]; then
+            printf '%s\n' \
+              'Expected exactly one glibcx-device-report-*.tar.gz attachment.' \
+              >"$RUNNER_TEMP/rejection.txt"
+            echo "accepted=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          attachment_url=${attachment_urls[0]}
+          archive="$RUNNER_TEMP/${attachment_url##*/}"
+          if ! curl -fL --proto '=https' --proto-redir '=https' \
+              --connect-timeout 10 --max-time 60 --max-filesize 5242880 \
+              --max-redirs 3 --retry 2 --silent --show-error \
+              "$attachment_url" -o "$archive" 2>"$RUNNER_TEMP/download-error.txt"; then
+            echo 'The attachment could not be downloaded within the 5 MiB limit.' \
+              >"$RUNNER_TEMP/rejection.txt"
+            echo "accepted=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! timeout 2m bash ci/validate-device-archive.sh \
+              "$archive" "$RUNNER_TEMP/validated" \
+              >"$RUNNER_TEMP/validation.txt" 2>&1; then
+            if [[ ! -s "$RUNNER_TEMP/validation.txt" ]]; then
+              echo 'Archive validation timed out or stopped without a diagnostic.' \
+                >"$RUNNER_TEMP/validation.txt"
+            fi
+            head -c 4096 "$RUNNER_TEMP/validation.txt" >"$RUNNER_TEMP/rejection.txt"
+            echo "accepted=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          report="$RUNNER_TEMP/validated/report.json"
+          archive_name=$(cat "$RUNNER_TEMP/validated/archive-name.txt")
+          sdk=$(jq -r '.device.sdk' "$report")
+          page_size=$(jq -r '.device.page_size' "$report")
+          slug=$(jq -r '.device.manufacturer + "-" + .device.model' "$report" \
+            | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+            | LC_ALL=C sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+          [[ -n "$slug" ]] || slug=unknown-device
+          if [[ ! "$archive_name" =~ ^glibcx-device-report-api${sdk}-${slug}-${page_size}-[0-9]{8}T[0-9]{6}Z[.]tar[.]gz$ ]]; then
+            echo 'The attachment filename does not match the device facts in report.json.' \
+              >"$RUNNER_TEMP/rejection.txt"
+            echo "accepted=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          commit=$(jq -r '.source.commit' "$report")
+          if ! gh api --silent "repos/${REPOSITORY}/commits/${commit}"; then
+            echo 'The tested commit does not exist in this GitHub repository.' \
+              >"$RUNNER_TEMP/rejection.txt"
+            echo "accepted=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf '%s\n' "$attachment_url" >"$RUNNER_TEMP/validated/attachment-url.txt"
+          echo "accepted=true" >>"$GITHUB_OUTPUT"
+
+      - name: Prepare an accepted result
+        if: steps.validate.outputs.accepted == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/validated/report.json"
+          archive_name=$(cat "$RUNNER_TEMP/validated/archive-name.txt")
+          archive_hash=$(cat "$RUNNER_TEMP/validated/archive.sha256")
+          attachment_url=$(cat "$RUNNER_TEMP/validated/attachment-url.txt")
+          android=$(jq -r '.device.android_release' "$report")
+          manufacturer=$(jq -r '.device.manufacturer' "$report")
+          model=$(jq -r '.device.model' "$report")
+          overall=$(jq -r '.overall | ascii_upcase' "$report")
+          safe_device=$(printf '%s %s' "$manufacturer" "$model" \
+            | LC_ALL=C tr -cd 'A-Za-z0-9 ._()+-')
+          [[ -n "$safe_device" ]] || safe_device='device'
+          printf '%s\n' \
+            "[device test] Android ${android} - ${safe_device} (${overall})" \
+            >"$RUNNER_TEMP/result-title.txt"
+          {
+            echo '## Automated report check'
+            echo
+            echo "The archive is well-formed and its reported result is **${overall}**."
+            echo
+            echo '| Field | Value |'
+            echo '|---|---|'
+            jq -r '
+              def cell: @html | gsub("[|]"; "&#124;");
+              "| Commit | " + (.source.commit | cell) + " |",
+              "| Device | " + ((.device.manufacturer + " " + .device.model) | cell) + " |",
+              "| Android | " + (.device.android_release | cell) + " / API " + (.device.sdk | tostring) + " |",
+              "| Kernel | " + (.device.kernel_release | cell) + " |",
+              "| Page size | " + (.device.page_size | tostring) + " bytes |",
+              "| Termux | " + ((.termux.apk_release + " " + .termux.version) | cell) + " |",
+              "| glibc-runner | " + (.termux.glibc_runner_version | cell) + " |"
+            ' "$report"
+            echo "| Archive | [${archive_name}](${attachment_url}) |"
+            echo "| SHA-256 | ${archive_hash} |"
+            echo
+            echo '| Test | Status | Exit code |'
+            echo '|---|---:|---:|'
+            jq -r '.tests[] | "| " + .id + " | " + (.status | ascii_upcase) + " | " + (.exit_code | tostring) + " |"' "$report"
+            echo
+            echo 'A maintainer still reviews the logs before adding report.json to the repository.'
+          } >"$RUNNER_TEMP/result-body.md"
+
+      - name: Prepare a rejection
+        if: steps.validate.outputs.accepted != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' '[rejected device test] report' \
+            >"$RUNNER_TEMP/result-title.txt"
+          if [[ ! -s "$RUNNER_TEMP/rejection.txt" ]]; then
+            echo 'Archive validation stopped without a diagnostic.' \
+              >"$RUNNER_TEMP/rejection.txt"
+          fi
+          rejection=$(head -c 4096 "$RUNNER_TEMP/rejection.txt" | jq -Rrsr '@html')
+          {
+            echo '## Report rejected'
+            echo
+            echo 'The uploaded report could not be accepted:'
+            echo
+            printf '<pre>%s</pre>\n' "$rejection"
+            echo
+            echo 'Run the device matrix again and open a new device-test issue with the generated archive.'
+          } >"$RUNNER_TEMP/result-body.md"
+
+      - name: Package the bounded response
+        id: package
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -s "$RUNNER_TEMP/result-title.txt" || ! -s "$RUNNER_TEMP/result-body.md" ]]; then
+            printf '%s\n' '[rejected device test] report' \
+              >"$RUNNER_TEMP/result-title.txt"
+            printf '%s\n' \
+              '## Report rejected' '' \
+              'Archive validation stopped without a usable result.' \
+              >"$RUNNER_TEMP/result-body.md"
+            accepted=false
+          else
+            accepted=${{ steps.validate.outputs.accepted == 'true' }}
+          fi
+          {
+            echo "accepted=$accepted"
+            echo "title=$(base64 -w0 "$RUNNER_TEMP/result-title.txt")"
+            echo "body=$(base64 -w0 "$RUNNER_TEMP/result-body.md")"
+          } >>"$GITHUB_OUTPUT"
+
+  respond:
+    if: always() && needs.validate.result != 'skipped'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      REPOSITORY: ${{ github.repository }}
+      RESULT_ACCEPTED: ${{ needs.validate.outputs.accepted }}
+      RESULT_TITLE: ${{ needs.validate.outputs.title }}
+      RESULT_BODY: ${{ needs.validate.outputs.body }}
+    steps:
+      - name: Post the review result
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$RESULT_TITLE" | base64 -d >"$RUNNER_TEMP/title.txt" \
+              || ! printf '%s' "$RESULT_BODY" | base64 -d >"$RUNNER_TEMP/body.md"; then
+            : >"$RUNNER_TEMP/title.txt"
+            : >"$RUNNER_TEMP/body.md"
+          fi
+          title=$(head -c 240 "$RUNNER_TEMP/title.txt" | tr -d '\r\n')
+          [[ -n "$title" ]] || title='[rejected device test] report'
+          if [[ ! -s "$RUNNER_TEMP/body.md" ]]; then
+            printf '%s\n' \
+              '## Report rejected' '' \
+              'Archive validation stopped without a usable result.' \
+              >"$RUNNER_TEMP/body.md"
+          fi
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPOSITORY" --title "$title"
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY" \
+            --body-file "$RUNNER_TEMP/body.md"
+          if [[ "$RESULT_ACCEPTED" != true ]]; then
+            gh issue close "$ISSUE_NUMBER" --repo "$REPOSITORY" \
+              --reason 'not planned'
+          fi

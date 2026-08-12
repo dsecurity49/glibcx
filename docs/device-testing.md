@@ -1,77 +1,94 @@
-# Device testing
+# Testing glibcx on Android
 
-glibcx crosses two libc environments: Termux starts on Android's Bionic libc,
-then the wrapper hands a Linux binary to an Android-patched glibc loader.
-Standard Linux CI cannot reproduce Android's linker environment, SELinux
-policy, seccomp filters, page size, or vendor kernel.
+GitHub Actions can exercise the loader and wrapper on native AArch64 Linux, but
+it cannot reproduce the Bionic environment of a phone. Android's seccomp
+filters, SELinux policy, vendor kernel, Termux build, and memory page size are
+all capable of changing the result. For that reason the repository keeps small,
+reviewed summaries from real devices.
 
-## Add a device result
+There is no requirement to cover every Android release before glibcx can be
+released. I only have direct access to some configurations. A report from any
+AArch64 phone is useful, including another run on a model already listed and a
+run that fails.
 
-I can test only a few Android devices myself. Community reports are how this
-matrix grows, and repeated Android versions or phone models still matter
-because vendors ship different kernels and security policies.
+## Running the test
 
-No Android version is singled out as more important than another, and a version
-without a community report does not block a release. The table says exactly
-what has been tested instead of implying coverage we do not have.
-
-Install the regular test tools and the repository-enabling package first:
+The test needs build tools, the Termux glibc repository, and `glibc-runner`.
+`glibc-repo` must be installed before the second package refresh, otherwise
+`glibc-runner` will not be visible to `pkg`.
 
 ```bash
 pkg update -y
-pkg install -y git clang jq curl file binutils nodejs util-linux gnupg xz-utils \
-  patchelf gzip glibc-repo
+pkg install -y git clang jq curl file binutils nodejs util-linux gnupg \
+  xz-utils patchelf gzip glibc-repo
 pkg update -y
 pkg install -y glibc-runner
 ```
 
-The second `pkg update` is required on a fresh Termux installation:
-`glibc-repo` adds the repository that contains `glibc-runner`.
-
-Clone the repository, then check out the exact commit you want to report:
+Test an exact commit so the result can be compared with the code later:
 
 ```bash
 git clone https://github.com/dsecurity49/glibcx.git
 cd glibcx
-git checkout <full-commit-sha>
-```
 
-Then run:
-
-```bash
+tested_commit=0123456789abcdef0123456789abcdef01234567
+git checkout "$tested_commit"
 bash ci/android_device_matrix.sh
 ```
 
-The script requires a clean tracked worktree. It builds glibcx, compares the
-generated executable with the checked-in one, runs the Android-relevant tests
-and live repository probe, and creates a
-`glibcx-device-report-*.tar.gz` archive. It does not install glibcx globally or
-modify fixture binaries.
+The tracked worktree must be clean. The script builds the monolithic file and
+checks it against the committed copy, then runs the state, wrapper, proc-exe,
+integration, and live-repository tests. It uses temporary state and does not
+install glibcx globally.
 
-The report redacts known home, Termux-prefix, repository paths, GitHub tokens,
-IPv4 addresses, Android UIDs, common identifiers, and private-key patterns.
-It refuses to create an archive if a recognized local path, token, Android UID,
-or private-key pattern remains. Inspect the archive before sharing it, especially
-if a command printed unusual environment or network details:
+## Sharing the result
+
+The script writes a file named `glibcx-device-report-*.tar.gz`. It removes
+known Termux paths, Android UIDs, tokens, common identifiers, and private-key
+patterns, and refuses to create an archive when it recognizes sensitive data.
+That filter cannot know everything private on a phone. List and extract the
+archive before uploading it:
 
 ```bash
-tar -tzf glibcx-device-report-*.tar.gz
-tar -xzf glibcx-device-report-*.tar.gz
+archive=glibcx-device-report-api31-example-4096-20260812T000000Z.tar.gz
+tar -tzf "$archive"
+mkdir glibcx-report-check
+tar -xzf "$archive" -C glibcx-report-check
 ```
 
-The archive can be attached to a device-test issue. Failed runs belong in the
-matrix discussion too; add a short note about what happened. If the report led
-to a fix, link the PR so future readers can follow the whole story.
+Use the filename printed by the script for `archive`. The example name above
+is only a placeholder.
 
-## Accepted results
+If the contents look safe, attach the archive to a
+[device-test issue](https://github.com/dsecurity49/glibcx/issues/new?template=device-test.yml)
+and check the privacy box. The form does not ask you to copy facts out of
+`report.json`. After submission, a workflow checks the archive and posts the
+commit, device details, test results, and SHA-256 on the issue.
 
-Reviewed reports are stored as small JSON records in
-[`docs/device-results/`](device-results/).
-Raw logs remain on the linked issue. CI validates the report schema and rejects
-common private runtime fields before a result can be merged.
+The workflow treats every upload as untrusted. It accepts only the six files
+written by the test script, limits both compressed and expanded sizes, and
+streams those files into its own temporary names instead of extracting paths
+chosen by the archive. The validation job cannot edit issues; a separate job
+with that permission receives only the bounded review text. A malformed or
+unsafe submission is closed with the reason it was rejected.
 
-| Android | Device | Kernel | Page size | Termux | Commit | Result | Source |
+A well-formed report whose tests failed is accepted because that result is
+useful evidence. When a failure leads to a fix, the pull request can link to
+the issue so the original device evidence remains available.
+
+Reviewed summaries are committed under [`device-results/`](device-results/).
+Raw logs remain on the issue or with the tester. CI checks the JSON schema and
+rejects several private runtime fields before accepting a summary.
+
+## Results so far
+
+| Android | Device | Kernel | Page size | Termux | Commit | Result | Report |
 |---|---|---|---:|---|---|---|---|
-| 12 (API 31) | vivo V2022 | 4.14.180-perf+ | 4 KB | F-Droid 0.119.0-beta.3 | `aa1fd46` | Pass | Local test |
+| 12 (API 31) | vivo V2022 | 4.14.180-perf+ | 4 KB | F-Droid 0.119.0-beta.3 | `aa1fd46` | Pass | Local run |
+| 12 (API 31) | vivo V2022 | 4.14.180-perf+ | 4 KB | F-Droid 0.119.0-beta.3 | `df9b687` | Pass | [Issue #5](https://github.com/dsecurity49/glibcx/issues/5) |
+| 14 (API 34) | Xiaomi 22101316I | 4.19.191-gcc12432b279b | 4 KB | F-Droid 0.119.0-beta.3 | `df9b687` | Pass | [Issue #3](https://github.com/dsecurity49/glibcx/issues/3) |
+| 16 (API 36) | vivo V2541 | 5.15.197-android13 | 4 KB | F-Droid 0.119.0-beta.3 | `df9b687` | Pass | [Issue #4](https://github.com/dsecurity49/glibcx/issues/4) |
 
-This is a record of real runs, not a claim that every binary works everywhere.
+Each row covers the tests recorded in its JSON file for one device and one
+commit. It is not a general promise about that Android version or every Linux
+binary.

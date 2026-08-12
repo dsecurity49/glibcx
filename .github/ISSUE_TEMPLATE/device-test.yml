@@ -1,52 +1,22 @@
 name: Device test result
-description: Share an Android/Termux device-matrix result
-title: "[device test] Android "
+description: Upload a report from the Android device test
+title: "[device test] report"
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing glibcx. Every result helps, including failures and devices already listed in the documentation.
-
-  - type: input
-    id: report_commit
-    attributes:
-      label: Tested commit
-      description: The 40-character commit printed in report.json.
-      placeholder: 0123456789abcdef0123456789abcdef01234567
-    validations:
-      required: true
-
-  - type: input
-    id: device
-    attributes:
-      label: Device and Android version
-      placeholder: vivo V2541, Android 16 / API 36
-    validations:
-      required: true
-
-  - type: input
-    id: page_size
-    attributes:
-      label: Page size
-      description: The page_size value from report.json.
-      placeholder: "4096"
-    validations:
-      required: true
+        Run `bash ci/android_device_matrix.sh`, inspect the generated archive,
+        then attach it below. A workflow will read the report and fill in the
+        commit, device, Android version, page size, test results, and SHA-256.
 
   - type: textarea
     id: report
     attributes:
       label: Device report
-      description: Drag the glibcx-device-report tar.gz archive here after inspecting it.
-      placeholder: Attach the generated archive here.
+      description: Drag one glibcx-device-report tar.gz archive into this field.
+      placeholder: Drop the archive here and wait for its link to appear.
     validations:
       required: true
-
-  - type: textarea
-    id: notes
-    attributes:
-      label: Notes
-      description: If anything failed, say what happened and whether it happens consistently.
 
   - type: checkboxes
     id: privacy

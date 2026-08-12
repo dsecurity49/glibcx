@@ -153,7 +153,7 @@ printf '%s  %s\n' "$source_sha256" "${source_archive##*/}" \
 cp "${glibc_tree}/LICENSE.md" "${source_tree}/glibc-packages-LICENSE.md"
 cp "${termux_tree}/LICENSE.md" "${source_tree}/termux-packages-LICENSE.md"
 cp "$LOCK_FILE" "${source_tree}/runtime-source.lock.json"
-cp profiles/README.md "${source_tree}/BUILDING.md"
+cp docs/releasing.md "${source_tree}/BUILDING.md"
 cp profiles/proc-exe-shim.c "${source_tree}/proc-exe-shim.c"
 cp profiles/build-proc-exe-shim.sh "${source_tree}/build-proc-exe-shim.sh"
 cp profiles/loader-audit.c "${source_tree}/loader-audit.c"

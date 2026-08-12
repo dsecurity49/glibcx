@@ -245,7 +245,7 @@ jobs:
             test "$local_digest" = "$remote_digest"
             asset_count=$((asset_count + 1))
           done
-          test "$asset_count" -eq 10
+          test "$asset_count" -eq 12
 
   publish:
     name: Publish immutable release

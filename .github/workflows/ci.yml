@@ -131,6 +131,7 @@ jobs:
           bash ci/provider_download_test.sh
           bash ci/provider_archive_test.sh
           bash ci/device_results_test.sh
+          bash ci/device_issue_test.sh
 
       - name: Run integration test
         run: bash ci/integration_test.sh

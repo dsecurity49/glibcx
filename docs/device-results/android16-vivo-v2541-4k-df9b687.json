@@ -31,5 +31,5 @@
     {"id": "proc_exe", "description": "proc-exe compatibility", "status": "pass", "exit_code": 0, "log": "logs/proc_exe.log"},
     {"id": "repository", "description": "live repository contract", "status": "pass", "exit_code": 0, "log": "logs/repository.log"}
   ],
-  "issue_url": null
+  "issue_url": "https://github.com/dsecurity49/glibcx/issues/4"
 }
