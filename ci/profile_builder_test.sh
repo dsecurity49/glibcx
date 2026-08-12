@@ -49,6 +49,10 @@ grep -Fq 'cd "$glibc_tree"' <<<"$run_in_builder_body" \
     || fail "managed runtime container helper does not enter the pinned builder tree"
 [[ "$(grep -Fc 'run_in_builder ' profiles/build-managed-runtime.sh)" -eq 3 ]] \
     || fail "not every managed runtime container invocation uses its repository root"
+grep -Fq 'mkdir -m 0777 "$module_output"' profiles/build-managed-runtime.sh \
+    || fail "managed runtime module output is not writable by the container builder"
+grep -Fq 'chmod 0755 "$module_output"' profiles/build-managed-runtime.sh \
+    || fail "managed runtime module output permissions are not tightened after build"
 pass "managed runtime container invocations use the pinned builder root"
 
 for dso_builder in profiles/build-proc-exe-shim.sh profiles/build-loader-audit.sh; do
