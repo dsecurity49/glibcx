@@ -56,6 +56,8 @@ for dso_builder in profiles/build-proc-exe-shim.sh profiles/build-loader-audit.s
         || fail "$dso_builder cannot use a CGCT compiler already in PATH"
     grep -Fq '${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc' "$dso_builder" \
         || fail "$dso_builder cannot find the pinned image's CGCT compiler"
+    grep -Fq -- '-isystem "$header_root"' "$dso_builder" \
+        || fail "$dso_builder does not pass the extracted profile's header root"
 done
 pass "managed runtime DSO builders support the pinned CGCT compiler"
 

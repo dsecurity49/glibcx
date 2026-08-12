@@ -11,7 +11,14 @@ sysroot="$1"
 source_file="$2"
 output_file="$3"
 
-[[ -f "${sysroot}/include/stdio.h" || -f "${sysroot}/usr/include/stdio.h" ]] || {
+header_root=""
+for include_root in "${sysroot}/include" "${sysroot}/usr/include"; do
+    if [[ -f "${include_root}/stdio.h" ]]; then
+        header_root="$include_root"
+        break
+    fi
+done
+[[ -n "$header_root" ]] || {
     echo "[proc-shim] Error: incomplete glibc sysroot (missing stdio.h)." >&2
     exit 1
 }
@@ -40,6 +47,7 @@ else
 fi
 
 "${compiler[@]}" --sysroot="$sysroot" \
+    -isystem "$header_root" \
     -shared -fPIC -nostdlib -O2 -Wall -Wextra -Werror \
     "$source_file" "$libc_path" \
     -Wl,-soname,glibcx-proc-exe-shim.so -o "$output_file"

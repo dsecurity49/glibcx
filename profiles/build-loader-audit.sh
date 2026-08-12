@@ -11,7 +11,14 @@ sysroot="$1"
 source_file="$2"
 output_file="$3"
 
-[[ -f "${sysroot}/include/link.h" || -f "${sysroot}/usr/include/link.h" ]] || {
+header_root=""
+for include_root in "${sysroot}/include" "${sysroot}/usr/include"; do
+    if [[ -f "${include_root}/link.h" ]]; then
+        header_root="$include_root"
+        break
+    fi
+done
+[[ -n "$header_root" ]] || {
     echo "[loader-audit] Error: incomplete glibc sysroot (missing link.h)." >&2
     exit 1
 }
@@ -33,9 +40,11 @@ cleanup() { rm -f "${object_file:?}"; }
 trap cleanup EXIT
 
 "${compiler[@]}" --sysroot="$sysroot" \
+    -isystem "$header_root" \
     -fPIC -ffreestanding -fno-stack-protector -O2 -Wall -Wextra -Werror \
     -c "$source_file" -o "$object_file"
 "${compiler[@]}" --sysroot="$sysroot" \
+    -isystem "$header_root" \
     -shared -nostdlib -Wl,-z,defs -Wl,-soname,glibcx-loader-audit.so \
     "$object_file" -o "$output_file"
 
