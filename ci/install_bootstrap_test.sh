@@ -21,7 +21,20 @@ assert_bootstrap_order() {
     pass "$file enables and refreshes glibc-repo before glibc-runner"
 }
 
+assert_readme_signer_pin() {
+    grep -Fq 'gpgv --status-fd 1' README.md \
+        || fail "README installer verification does not request machine-readable signature status"
+    grep -Fq '$2 == "VALIDSIG"' README.md \
+        || fail "README installer verification does not parse the validated signer"
+    grep -Fq 'test "$signer" = "$expected_fingerprint"' README.md \
+        || fail "README installer verification does not pin the signing fingerprint"
+    grep -Fq 'test "$primary" = "$expected_fingerprint"' README.md \
+        || fail "README installer verification does not pin the primary fingerprint"
+    pass "README binds the installer signature to the pinned release key"
+}
+
 assert_bootstrap_order install.sh
 assert_bootstrap_order src/setup.sh
+assert_readme_signer_pin
 
 printf '\nAll install bootstrap tests passed.\n'

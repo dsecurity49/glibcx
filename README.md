@@ -38,8 +38,15 @@ expected_fingerprint=EB13DBFA9354A55285CF4B03B5255ACD0708C45E
 observed_fingerprint=$(LC_ALL=C gpg --batch --show-keys --with-colons \
   glibcx-release.gpg | LC_ALL=C awk -F: '$1 == "fpr" {print toupper($10); exit}')
 
-test "$observed_fingerprint" = "$expected_fingerprint" \
-  && gpgv --keyring glibcx-release.gpg install.sh.asc install.sh \
+verification=$(LC_ALL=C gpgv --status-fd 1 --keyring ./glibcx-release.gpg \
+  install.sh.asc install.sh) \
+  && signer=$(LC_ALL=C awk '$2 == "VALIDSIG" {print toupper($3); exit}' \
+    <<<"$verification") \
+  && primary=$(LC_ALL=C awk '$2 == "VALIDSIG" {print toupper($NF); exit}' \
+    <<<"$verification") \
+  && test "$observed_fingerprint" = "$expected_fingerprint" \
+  && { test "$signer" = "$expected_fingerprint" \
+    || test "$primary" = "$expected_fingerprint"; } \
   && bash install.sh
 ```
 

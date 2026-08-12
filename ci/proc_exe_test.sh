@@ -20,9 +20,19 @@ if [[ "$(uname -o 2>/dev/null || true)" == Android ]]; then
     glibc_sysroot="${PREFIX:-/data/data/com.termux/files/usr}/glibc"
     [[ -f "${glibc_sysroot}/lib/Scrt1.o" && -f "${glibc_sysroot}/include/stdio.h" ]] \
         || fail "installed glibc development sysroot is incomplete"
+    glibc_sysroot_real=$(readlink -f "$glibc_sysroot") \
+        || fail "installed glibc development sysroot cannot be resolved"
     glibc_libc=$(find -H "${glibc_sysroot}/lib" "${glibc_sysroot}/usr/lib" \
-        -name libc.so.6 -type f -print -quit 2>/dev/null) || true
-    [[ -n "$glibc_libc" ]] || fail "installed glibc development sysroot is missing libc.so.6"
+        -name libc.so.6 \( -type f -o -type l \) -print -quit 2>/dev/null) || true
+    [[ -n "$glibc_libc" && -e "$glibc_libc" ]] \
+        || fail "installed glibc development sysroot is missing libc.so.6"
+    glibc_libc=$(readlink -f "$glibc_libc") \
+        || fail "installed glibc libc.so.6 cannot be resolved"
+    case "$glibc_libc" in
+        "${glibc_sysroot_real}"/*) ;;
+        *) fail "installed glibc libc.so.6 resolves outside its sysroot" ;;
+    esac
+    [[ -f "$glibc_libc" ]] || fail "installed glibc libc.so.6 is not a regular file"
 else
     glibc_sysroot=/
 fi
