@@ -53,7 +53,9 @@ pass "managed runtime container invocations use the pinned builder root"
 
 for dso_builder in profiles/build-proc-exe-shim.sh profiles/build-loader-audit.sh; do
     grep -Fq 'command -v aarch64-linux-gnu-gcc' "$dso_builder" \
-        || fail "$dso_builder cannot use the pinned CGCT image compiler"
+        || fail "$dso_builder cannot use a CGCT compiler already in PATH"
+    grep -Fq '${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc' "$dso_builder" \
+        || fail "$dso_builder cannot find the pinned image's CGCT compiler"
 done
 pass "managed runtime DSO builders support the pinned CGCT compiler"
 

@@ -21,6 +21,8 @@ if command -v clang >/dev/null 2>&1; then
     compiler=(clang --target=aarch64-linux-gnu)
 elif command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
     compiler=(aarch64-linux-gnu-gcc)
+elif [[ -x "${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc" ]]; then
+    compiler=("${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc")
 else
     echo "[loader-audit] Error: no AArch64 C compiler is available." >&2
     exit 1
