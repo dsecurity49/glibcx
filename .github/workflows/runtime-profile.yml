@@ -1,0 +1,115 @@
+name: Build managed runtime profile
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Intended production tag
+        required: true
+        type: string
+      candidate_commit:
+        description: Exact pre-tag candidate commit; leave empty to build an existing tag
+        required: false
+        default: ""
+        type: string
+      profile_id:
+        description: Immutable managed profile ID
+        required: true
+        type: string
+      source_date_epoch:
+        description: Reproducible Unix timestamp
+        required: true
+        type: string
+      builder_image:
+        description: Builder image locked in profiles/runtime-source.lock.json
+        required: true
+        default: ghcr.io/termux/package-builder-cgct@sha256:e6a401b0c47b51f886dbd63d33f257ef9b3668cf24602f1cb6628a6d5e2656f3
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: runtime-profile-${{ inputs.tag }}-${{ inputs.profile_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Android-patched AArch64 glibc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_commit != '' && inputs.candidate_commit || format('refs/tags/{0}', inputs.tag) }}
+          fetch-depth: 0
+
+      - name: Validate tag and inputs
+        id: preflight
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          SOURCE_DATE_EPOCH: ${{ inputs.source_date_epoch }}
+          BUILDER_IMAGE: ${{ inputs.builder_image }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]]
+          [[ "$PROFILE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+          [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]
+          [[ "$BUILDER_IMAGE" =~ ^ghcr\.io/termux/package-builder-cgct@sha256:[0-9a-f]{64}$ ]]
+          test "$BUILDER_IMAGE" = "$(jq -r '.builder_image' profiles/runtime-source.lock.json)"
+          if [[ -n "$CANDIDATE_COMMIT" ]]; then
+            [[ "$CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+            test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+            commit="$CANDIDATE_COMMIT"
+          else
+            test "$(git cat-file -t "$TAG")" = tag
+            commit=$(git rev-list -n 1 "$TAG")
+          fi
+          version=${TAG#v}
+          grep -Fqx "GLIBCX_VERSION=\"${version}\"" src/common.sh
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+
+      - name: Set up cross-architecture execution
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build final-prefix runtime and corresponding source
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          PROFILE_ID: ${{ inputs.profile_id }}
+          SOURCE_DATE_EPOCH: ${{ inputs.source_date_epoch }}
+          BUILDER_IMAGE: ${{ inputs.builder_image }}
+          GLIBCX_COMMIT: ${{ steps.preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y libarchive-tools jq
+          bash profiles/build-managed-runtime.sh \
+            "$PROFILE_ID" "$TAG" "$GLIBCX_COMMIT" "$BUILDER_IMAGE" \
+            glibcx-runtime-profile
+
+      - name: Validate build provenance and payload
+        shell: bash
+        env:
+          PROFILE_ID: ${{ inputs.profile_id }}
+          GLIBCX_COMMIT: ${{ steps.preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          jq -e --arg commit "$GLIBCX_COMMIT" \
+            '.schema == 1 and .glibcx_commit == $commit' \
+            glibcx-runtime-profile/build-metadata.json >/dev/null
+          test -s "glibcx-runtime-profile/payload/${PROFILE_ID}.payload/profile.json"
+          test -d glibcx-runtime-profile/corresponding-source
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glibcx-runtime-profile
+          path: glibcx-runtime-profile
+          if-no-files-found: error
+          retention-days: 30

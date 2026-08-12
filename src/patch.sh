@@ -16,11 +16,55 @@ _c_byte_array() {
 }
 
 cmd_patch() {
-    init_env
-    local target_bin="${1:-}"
+    local target_bin="" runtime_request="" no_verify=false dry_run=false
+    local offline=false refresh=false no_resolve=false proc_exe_mode=auto verbose=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --runtime)
+                [[ $# -ge 2 ]] || { echo "[glibcx] Error: --runtime requires a profile ID." >&2; exit 1; }
+                runtime_request="$2"
+                shift 2
+                ;;
+            --runtime=*)
+                runtime_request="${1#*=}"
+                [[ -n "$runtime_request" ]] || { echo "[glibcx] Error: --runtime requires a profile ID." >&2; exit 1; }
+                shift
+                ;;
+            --no-verify) no_verify=true; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            --offline) offline=true; shift ;;
+            --refresh) refresh=true; shift ;;
+            --no-resolve) no_resolve=true; shift ;;
+            --verbose) verbose=true; shift ;;
+            --proc-exe=*)
+                proc_exe_mode="${1#*=}"
+                case "$proc_exe_mode" in
+                    auto|on|off) ;;
+                    *)
+                        echo "[glibcx] Error: --proc-exe must be auto, on, or off." >&2
+                        exit 1
+                        ;;
+                esac
+                shift
+                ;;
+            --*)
+                echo "[glibcx] Error: unsupported patch option '$1' in this milestone." >&2
+                exit 1
+                ;;
+            *)
+                if [[ -n "$target_bin" ]]; then
+                    echo "[glibcx] Error: patch accepts exactly one target binary." >&2
+                    exit 1
+                fi
+                target_bin="$1"
+                shift
+                ;;
+        esac
+    done
+
     if [[ -z "$target_bin" || ! -f "$target_bin" ]]; then
         echo "[glibcx] Error: File '${target_bin:-<none>}' not found." >&2
-        echo "Usage: glibcx patch <binary>" >&2
+        echo "Usage: glibcx patch <binary> [--runtime <profile>] [--offline|--refresh] [--verbose]" >&2
         exit 1
     fi
 
@@ -29,94 +73,104 @@ cmd_patch() {
         echo "[glibcx] Error: paths containing newlines are unsupported." >&2
         exit 1
     fi
-
-    if ! _is_aarch64_elf "$target_bin"; then
-        echo "[glibcx] Error: '$target_bin' is not a valid 64-bit AArch64 ELF binary." >&2
+    if [[ "$offline" == true && "$refresh" == true ]]; then
+        echo "[glibcx] Error: --offline and --refresh cannot be combined." >&2
         exit 1
     fi
-
-    local interpreter
-    interpreter=$(readelf -l "$target_bin" 2>/dev/null \
-        | grep -oP 'Requesting program interpreter: \K[^]]+' || true)
-    if [[ -z "$interpreter" ]]; then
-        echo "[glibcx] Error: '$target_bin' has no dynamic interpreter (it is static or unsupported)." >&2
-        echo "[glibcx] Static binaries do not need glibcx wrappers." >&2
+    if [[ "$dry_run" == true && "$refresh" == true ]]; then
+        echo "[glibcx] Error: --dry-run cannot refresh mutable repository state." >&2
         exit 1
     fi
-    case "$(basename "$interpreter")" in
-        ld-linux-aarch64.so.1|ld.so) ;;
-        *)
-            echo "[glibcx] Error: '$target_bin' does not use a supported glibc loader:" >&2
-            echo "  $interpreter" >&2
+    if [[ -z "$runtime_request" && -f "$REGISTRY_FILE" ]] \
+        && jq -e '.schema == 3 and (.apps | type) == "object"' "$REGISTRY_FILE" >/dev/null 2>&1; then
+        local existing_manifest
+        existing_manifest=$(jq -r --arg path "$target_bin" '.apps[$path].manifest // empty' "$REGISTRY_FILE")
+        if [[ -n "$existing_manifest" && -f "$existing_manifest" ]]; then
+            runtime_request=$(jq -r '.runtime.profile_id // empty' "$existing_manifest")
+            [[ -n "$runtime_request" && "$verbose" == true ]] \
+                && echo "[glibcx] Reusing recorded runtime '$runtime_request' for this app."
+        fi
+    fi
+
+    local inspection interpreter needed_libs max_req_glibc profile_json
+    local runtime_id runtime_loader profile_lib_path runtime_libc
+    inspection=$(elf_inspect "$target_bin")
+    if [[ "$(jq -r '.valid' <<<"$inspection")" != "true" ]]; then
+        elf_print_errors <<<"$inspection"
+        exit 1
+    fi
+    interpreter=$(jq -r '.program_headers.interpreter' <<<"$inspection")
+    needed_libs=$(jq -r '.dynamic.needed[]' <<<"$inspection")
+    max_req_glibc=$(elf_max_glibc_requirement <<<"$inspection")
+    if [[ -z "$runtime_request" \
+        && -z "$(find "$RUNTIME_ROOT" -mindepth 2 -maxdepth 2 -name manifest.json -type f -print -quit 2>/dev/null)" ]]; then
+        if [[ "$dry_run" == true || "$offline" == true ]]; then
+            echo "[glibcx] Error: no managed runtime is installed and this mode forbids installation." >&2
             exit 1
-            ;;
-    esac
-
-    local needed_libs
-    needed_libs=$(readelf -d "$target_bin" 2>/dev/null | grep NEEDED | grep -oP '\[\K[^\]]+' || true)
-    if grep -qx 'libc.so' <<< "$needed_libs"; then
-        echo "[glibcx] Error: '$target_bin' links Android/Bionic libc.so, not glibc libc.so.6." >&2
-        echo "[glibcx] Bionic binaries run directly and must not be patched." >&2
+        fi
+        cmd_runtime_install recommended || exit 1
+    fi
+    profile_json=$(runtime_profile_select "$runtime_request" "$inspection") || exit 1
+    runtime_id=$(jq -r '.profile_id' <<<"$profile_json")
+    runtime_loader=$(jq -r '.loader' <<<"$profile_json")
+    profile_lib_path=$(jq -r '.library_dirs | join(":")' <<<"$profile_json")
+    runtime_libc=$(jq -r '.library_dirs[]' <<<"$profile_json" \
+        | while IFS= read -r runtime_lib_dir; do
+            if [[ -f "${runtime_lib_dir}/libc.so.6" ]]; then
+                printf '%s/libc.so.6\n' "$runtime_lib_dir"
+                break
+            fi
+        done)
+    if [[ ! -x "$runtime_loader" || -z "$runtime_libc" ]]; then
+        echo "[glibcx] Error: runtime '$runtime_id' has no usable loader/libc pair." >&2
         exit 1
     fi
 
     local bin_name
     bin_name="$(basename "$target_bin")"
 
-    # Reject wrapper name collision: two binaries with the same basename cannot
-    # share ~/.glibcx/bin/<name> (and the vendored-lib dir ~/.glibcx/lib/<name>).
-    local other_path
-    while IFS= read -r other_path; do
-        [[ -z "$other_path" ]] && continue
-        if [[ "$other_path" != "$target_bin" && "$(basename "$other_path")" == "$bin_name" ]]; then
-            echo "[glibcx] Error: '$bin_name' is already registered for a different binary:" >&2
-            echo "  $other_path" >&2
-            echo "[glibcx] Wrappers are keyed by basename in ~/.glibcx/bin/, so two binaries" >&2
-            echo "[glibcx] with the same name cannot be patched together." >&2
-            echo "[glibcx] To fix this, run: glibcx restore $other_path" >&2
-            exit 1
-        fi
-    done < <(json_list_paths)
-
-    echo "[glibcx] Auditing '$bin_name'..."
+    local needed_count
+    needed_count=$(jq '.dynamic.needed | length' <<<"$inspection")
+    echo "[glibcx] Preparing '$bin_name' · runtime $runtime_id · $needed_count startup DSO(s)"
+    if [[ "$(jq '.warnings | length' <<<"$inspection")" -gt 0 ]]; then
+        jq -r '.warnings[] | "[glibcx] WARNING: " + .' <<<"$inspection"
+    fi
 
     # --- 1. NEEDED library audit ------------------------------------------------
-    echo "[glibcx] Needed shared libraries:"
+    [[ "$verbose" == true ]] && echo "[glibcx] Needed shared libraries:"
     if [[ -z "$needed_libs" ]]; then
-        echo "  (none — unusual dynamically linked binary)"
+        [[ "$verbose" == true ]] && echo "  (none — unusual dynamically linked binary)"
     else
         local non_glibc=()
         while IFS= read -r lib; do
             if echo "$lib" | grep -qE "$_GLIBC_LIBS_RE"; then
-                echo "  [glibc]  $lib"
+                [[ "$verbose" == true ]] && echo "  [glibc] $lib"
             else
-                echo "  [EXTERN] $lib  <-- NOT resolved by glibcx"
+                [[ "$verbose" == true ]] && echo "  [DSO]   $lib"
                 non_glibc+=("$lib")
             fi
         done <<< "$needed_libs"
-        if [[ ${#non_glibc[@]} -gt 0 ]]; then
-            echo "[glibcx] WARNING: ${#non_glibc[@]} non-glibc dep(s) detected."
-            echo "[glibcx]   These will fail at runtime unless vendored manually beside the binary."
-            echo "[glibcx]   Missing: ${non_glibc[*]}"
+        if [[ "$verbose" == true && ${#non_glibc[@]} -gt 0 ]]; then
+            echo "[glibcx] Auditing ${#non_glibc[@]} non-core DSO dependency/dependencies."
         fi
     fi
 
     # --- 2. GLIBC version audit -------------------------------------------------
-    local max_req_glibc
-    max_req_glibc=$(readelf -V "$target_bin" 2>/dev/null \
-        | grep -oE "GLIBC_[0-9]+\.[0-9]+" | sort -V | tail -n1 || echo "unknown")
-
     local have_glibc
-    have_glibc=$(strings "${GLIBC_LIB_DIR}/libc.so.6" 2>/dev/null \
-        | grep -oE "GLIBC_[0-9]+\.[0-9]+" | sort -V | tail -n1 || echo "unknown")
+    have_glibc=$(LC_ALL=C strings "$runtime_libc" 2>/dev/null \
+        | LC_ALL=C grep -oE "GLIBC_[0-9]+\.[0-9]+" \
+        | LC_ALL=C sort -V | LC_ALL=C tail -n1 || true)
+    [[ -n "$have_glibc" ]] || have_glibc=unknown
 
-    echo "[glibcx] Binary requires GLIBC up to : $max_req_glibc"
-    echo "[glibcx] Installed glibc provides up to: $have_glibc"
+    if [[ "$verbose" == true ]]; then
+        echo "[glibcx] GLIBC required/provided: $max_req_glibc / $have_glibc"
+    fi
 
     if [[ "$max_req_glibc" != "unknown" && "$have_glibc" != "unknown" ]]; then
         # Compare versions — sort -V, pick highest; if req > have, warn
         local highest
-        highest=$(printf '%s\n%s\n' "$max_req_glibc" "$have_glibc" | sort -V | tail -n1)
+        highest=$(printf '%s\n%s\n' "$max_req_glibc" "$have_glibc" \
+            | LC_ALL=C sort -V | LC_ALL=C tail -n1)
         if [[ "$highest" == "$max_req_glibc" && "$max_req_glibc" != "$have_glibc" ]]; then
             echo "[glibcx] WARNING: binary requires $max_req_glibc but installed glibc only provides $have_glibc."
             echo "[glibcx]   Symbol resolution may fail at runtime."
@@ -125,18 +179,203 @@ cmd_patch() {
 
     # --- 3. Hash & Fingerprint (identity + metadata drift detection) ------------
     local orig_hash
-    orig_hash=$(sha256sum "$target_bin" | awk '{print $1}')
+    orig_hash=$(_sha256_file "$target_bin")
     local patched_fp
     patched_fp=$(_fingerprint "$target_bin")
+    if [[ "$proc_exe_mode" == auto ]]; then
+        local needs_proc_exe=false
+        if elf_has_pyinstaller_archive "$target_bin"; then
+            needs_proc_exe=true
+        elif jq -e --arg basename "$bin_name" --arg hash "$orig_hash" '
+            (.proc_exe_shim.path // "") != ""
+            and ((.proc_exe_shim.auto_targets // [])
+                | any(.basename == $basename and (.sha256 == null or .sha256 == $hash)))
+        ' <<<"$profile_json" >/dev/null; then
+            needs_proc_exe=true
+        fi
+        if [[ "$needs_proc_exe" == true ]]; then
+            if [[ "$(jq -r '.kind' <<<"$profile_json")" != managed ]] \
+                || [[ -z "$(jq -r '.proc_exe_shim.path // empty' <<<"$profile_json")" ]]; then
+                echo "[glibcx] Error: this self-inspecting binary requires a managed runtime with proc-exe support." >&2
+                echo "[glibcx] Install a current managed runtime, or use --proc-exe=off only for diagnosis." >&2
+                exit 1
+            fi
+            proc_exe_mode=on
+        else
+            proc_exe_mode=off
+        fi
+    fi
+    local proc_exe_shim=""
+    if [[ "$proc_exe_mode" == on ]]; then
+        if [[ "$(jq -r '.kind' <<<"$profile_json")" != managed ]]; then
+            echo "[glibcx] Error: proc-exe mode requires a signed managed runtime profile." >&2
+            exit 1
+        fi
+        proc_exe_shim=$(jq -r '.proc_exe_shim.path // empty' <<<"$profile_json")
+        if [[ -z "$proc_exe_shim" || ! -f "$proc_exe_shim" ]]; then
+            echo "[glibcx] Error: selected runtime has no verified proc-exe shim." >&2
+            exit 1
+        fi
+    fi
+
+    if [[ "$dry_run" == true ]]; then
+        local preview_app_id preview_app_lib preview_verification
+        preview_app_id="$(_sanitize_basename "$bin_name")-${orig_hash:0:16}"
+        preview_app_lib="${APPS_DIR}/${preview_app_id}/current/lib"
+        if [[ "$no_verify" == true ]]; then
+            echo "[glibcx] Dry run: loader verification would be skipped by explicit request."
+        else
+            preview_verification=$(loader_verify_target "$profile_json" "$preview_app_lib" \
+                "$preview_app_lib" "$target_bin" "$inspection" "$proc_exe_mode")
+            echo "[glibcx] Dry run loader verification: $(jq -r '.verified' <<<"$preview_verification")"
+            if [[ "$(jq -r '.verified' <<<"$preview_verification")" != "true" ]]; then
+                jq -r '.list.output, .unexpected_resolutions[]?' <<<"$preview_verification" >&2
+                return 1
+            fi
+        fi
+        echo "[glibcx] Dry run app ID candidate : $preview_app_id"
+        echo "[glibcx] Dry run runtime profile  : $runtime_id"
+        echo "[glibcx] No locks were acquired and no files were changed."
+        return 0
+    fi
+
+    init_env
+
+    local target_lock registry_lock app_lock app_id
+    local app_root generations_dir staging_dir generation_dir generation_number
+    local current_link current_dir previous_current="" registry_snapshot
+    local replace_legacy_alias=false
+    local wrapper_c wrapper_bin library_path
+
+    lock_acquire target_lock "$(lock_target_name "$target_bin")"
+    lock_acquire registry_lock registry
+    app_id=$(state_allocate_app_id_locked "$target_bin" "$bin_name" "$orig_hash")
+    lock_acquire app_lock "$(lock_app_name "$app_id")"
+
+    app_root=$(state_app_root "$app_id")
+    generations_dir="${app_root}/generations"
+    current_link="${app_root}/current"
+    mkdir -p "$generations_dir"
+    if [[ -L "$current_link" ]]; then
+        previous_current=$(readlink "$current_link")
+        if [[ ! "$previous_current" =~ ^generations/[1-9][0-9]*$ \
+            || ! -d "${app_root}/${previous_current}" ]]; then
+            echo "[glibcx] Error: app current-generation link is invalid." >&2
+            lock_release "$app_lock"
+            lock_release "$registry_lock"
+            lock_release "$target_lock"
+            exit 1
+        fi
+        current_dir="${app_root}/${previous_current}"
+        if [[ -f "${BIN_DIR}/${bin_name}" && ! -L "${BIN_DIR}/${bin_name}" \
+            && -f "${current_dir}/manifest.json" ]] \
+            && jq -e '.migration.from_schema == 2 and (.wrapper.sha256 | type) == "string"' \
+                "${current_dir}/manifest.json" >/dev/null 2>&1 \
+            && [[ "$(_sha256_file "${BIN_DIR}/${bin_name}")" \
+                == "$(jq -r '.wrapper.sha256' "${current_dir}/manifest.json")" ]]; then
+            replace_legacy_alias=true
+        fi
+    elif [[ -e "$current_link" ]]; then
+        echo "[glibcx] Error: app current-generation path is not a symlink." >&2
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        exit 1
+    else
+        current_dir=""
+    fi
+    local final_wrapper
+    final_wrapper=$(state_current_wrapper_path "$app_id")
+    staging_dir=$(mktemp -d "${generations_dir}/.stage.XXXXXX")
+    mkdir -p "${staging_dir}/lib"
+    if [[ -n "$current_dir" && -d "${current_dir}/lib" ]]; then
+        cp -a "${current_dir}/lib/." "${staging_dir}/lib/"
+    fi
+
+    local verification_json dependencies_json repository_json
+    if ! repository_json=$(resolver_prepare_startup_closure "$profile_json" "$target_bin" \
+        "$inspection" "${staging_dir}/lib" "$offline" "$refresh" "$no_resolve" \
+        "$proc_exe_mode"); then
+        rm -rf "${staging_dir:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        exit 1
+    fi
+    if [[ "$no_verify" == true ]]; then
+        verification_json=$(jq -n '{
+            verified: false,
+            scope: "skipped-by-user",
+            verify: {exit_code: null, output: ""},
+            list: {exit_code: null, output: ""},
+            list_sha256: null,
+            library_path: null,
+            unexpected_resolutions: []
+        }')
+        echo "[glibcx] WARNING: loader verification was explicitly skipped."
+    else
+        verification_json=$(loader_verify_target "$profile_json" "${staging_dir}/lib" \
+            "$(state_current_lib_path "$app_id")" "$target_bin" "$inspection" "$proc_exe_mode")
+        if [[ "$(jq -r '.verified' <<<"$verification_json")" != "true" ]]; then
+            echo "[glibcx] Error: loader verification failed." >&2
+            jq -r '
+                if .verify.output != "" then "  --verify: " + .verify.output else empty end,
+                if .list.output != "" then "  --list: " + .list.output else empty end,
+                .unexpected_resolutions[]? | "  unexpected resolution: " + .
+            ' <<<"$verification_json" >&2
+            rm -rf "${staging_dir:?}"
+            lock_release "$app_lock"
+            lock_release "$registry_lock"
+            lock_release "$target_lock"
+            exit 1
+        fi
+        echo "[glibcx] Startup closure verified."
+    fi
+    if [[ "$(jq -r '.verified' <<<"$verification_json")" == "true" ]]; then
+        jq -r '.list.output' <<<"$verification_json" >"${staging_dir}/resolution.txt"
+        chmod 600 "${staging_dir}/resolution.txt"
+        if ! dependencies_json=$(resolver_manifest_dependencies "$verification_json" "$profile_json" \
+            "${staging_dir}/lib" "$(state_current_lib_path "$app_id")"); then
+            rm -rf "${staging_dir:?}"
+            lock_release "$app_lock"
+            lock_release "$registry_lock"
+            lock_release "$target_lock"
+            exit 1
+        fi
+    else
+        : >"${staging_dir}/resolution.txt"
+        chmod 600 "${staging_dir}/resolution.txt"
+        dependencies_json='[]'
+    fi
 
     # --- 4. Compile C userland-exec wrapper ------------------------------------
-    local wrapper_c="${CLI_STORAGE}/bin/${bin_name}.c"
-    local wrapper_bin="${CLI_STORAGE}/bin/${bin_name}"
-    local wrapper_tmp="${wrapper_bin}.tmp.$$"
-    local target_c_bytes ldso_c_bytes library_path_c_bytes
+    wrapper_c="${staging_dir}/wrapper.c"
+    wrapper_bin="${staging_dir}/wrapper"
+    local target_c_bytes ldso_c_bytes library_path_c_bytes hwcaps_mask_c_bytes hwcaps_policy_c
+    local ssl_cert_path_c_bytes
+    local env_real_c_bytes env_wrapper_c_bytes env_app_c_bytes env_mode_c_bytes env_tunables_c_bytes
+    local env_ssl_cert_c_bytes trace_marker_c_bytes proc_exe_shim_c_bytes
     target_c_bytes=$(_c_byte_array "$target_bin")
-    ldso_c_bytes=$(_c_byte_array "$GLIBC_INTERPRETER")
-    library_path_c_bytes=$(_c_byte_array "${GLIBC_LIB_DIR}:${CLI_STORAGE}/lib/${bin_name}")
+    ldso_c_bytes=$(_c_byte_array "$runtime_loader")
+    library_path="$(state_current_lib_path "$app_id"):${profile_lib_path}"
+    library_path_c_bytes=$(_c_byte_array "$library_path")
+    hwcaps_mask_c_bytes=$(_c_byte_array \
+        "$(jq -r '.loader_policy.glibc_hwcaps_mask // empty' <<<"$profile_json")")
+    hwcaps_policy_c=0
+    jq -e '.loader_policy | has("glibc_hwcaps_mask")' <<<"$profile_json" >/dev/null 2>&1 \
+        && hwcaps_policy_c=1
+    ssl_cert_path_c_bytes=$(_c_byte_array \
+        "${PREFIX:-/data/data/com.termux/files/usr}/etc/tls/cert.pem")
+    env_real_c_bytes=$(_c_byte_array "GLIBCX_REAL_EXE=${target_bin}")
+    env_wrapper_c_bytes=$(_c_byte_array "GLIBCX_WRAPPER_EXE=${final_wrapper}")
+    env_app_c_bytes=$(_c_byte_array "GLIBCX_APP_ID=${app_id}")
+    env_mode_c_bytes=$(_c_byte_array "GLIBCX_PROC_EXE_MODE=${proc_exe_mode}")
+    env_tunables_c_bytes=$(_c_byte_array \
+        "GLIBC_TUNABLES=$(jq -r '.allowed_tunables // [] | join(":")' <<<"$profile_json")")
+    env_ssl_cert_c_bytes=$(_c_byte_array \
+        "SSL_CERT_FILE=${PREFIX:-/data/data/com.termux/files/usr}/etc/tls/cert.pem")
+    trace_marker_c_bytes=$(_c_byte_array "--glibcx-internal-trace=${app_id}")
+    proc_exe_shim_c_bytes=$(_c_byte_array "$proc_exe_shim")
 
     cat << C_CODE > "$wrapper_c"
 #include <stdio.h>
@@ -181,6 +420,39 @@ static int is_power_of_two(size_t value) {
 static const char target_bin[] = { ${target_c_bytes} };
 static const char ldso_path[] = { ${ldso_c_bytes} };
 static const char library_path[] = { ${library_path_c_bytes} };
+static const char hwcaps_mask[] = { ${hwcaps_mask_c_bytes} };
+static const int use_hwcaps_policy = ${hwcaps_policy_c};
+static const char ssl_cert_path[] = { ${ssl_cert_path_c_bytes} };
+static const char env_real_exe[] = { ${env_real_c_bytes} };
+static const char env_wrapper_exe[] = { ${env_wrapper_c_bytes} };
+static const char env_app_id[] = { ${env_app_c_bytes} };
+static const char env_proc_mode[] = { ${env_mode_c_bytes} };
+static const char env_tunables[] = { ${env_tunables_c_bytes} };
+static const char env_ssl_cert[] = { ${env_ssl_cert_c_bytes} };
+static const char trace_marker[] = { ${trace_marker_c_bytes} };
+static const char proc_exe_shim[] = { ${proc_exe_shim_c_bytes} };
+
+static int has_env_name(const char *entry, const char *name) {
+    size_t length = strlen(name);
+    return strncmp(entry, name, length) == 0 && entry[length] == '=';
+}
+
+static void fill_secure_random(uint8_t *buffer, size_t length) {
+    int random_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (random_fd < 0) die("open /dev/urandom");
+    size_t offset = 0;
+    while (offset < length) {
+        ssize_t count = read(random_fd, buffer + offset, length - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            close(random_fd);
+            errno = EIO;
+            die("read /dev/urandom");
+        }
+        offset += (size_t)count;
+    }
+    if (close(random_fd) != 0) die("close /dev/urandom");
+}
 
 unsigned long getauxval_from_envp(const char **envp, unsigned long type) {
     const char **p = envp;
@@ -239,6 +511,7 @@ int main(int argc, const char **argv, const char **envp) {
 
     size_t page = page_size();
     size_t vmin = (size_t)-1, vmax = 0, max_align = page;
+    int entry_in_executable_segment = 0;
     const Elf64_Phdr *first_load = NULL;
     for (int i = 0; i < eh->e_phnum; i++) {
         const Elf64_Phdr *ph = (const Elf64_Phdr *)(fdata + eh->e_phoff + i * eh->e_phentsize);
@@ -247,6 +520,17 @@ int main(int argc, const char **argv, const char **envp) {
                 ph->p_filesz > (size_t)st.st_size - ph->p_offset ||
                 ph->p_vaddr > SIZE_MAX - ph->p_memsz)
                 invalid_elf("invalid ld.so load segment");
+            if ((ph->p_flags & PF_W) && (ph->p_flags & PF_X))
+                invalid_elf("writable-executable ld.so load segment");
+            if (ph->p_align > 1 &&
+                (!is_power_of_two(ph->p_align) ||
+                 ((ph->p_vaddr - ph->p_offset) & (ph->p_align - 1)) != 0))
+                invalid_elf("invalid ld.so segment alignment");
+            if (((ph->p_vaddr - ph->p_offset) & (page - 1)) != 0)
+                invalid_elf("ld.so segment is not page-congruent");
+            if ((ph->p_flags & PF_X) && eh->e_entry >= ph->p_vaddr &&
+                eh->e_entry - ph->p_vaddr < ph->p_memsz)
+                entry_in_executable_segment = 1;
             if (!first_load) first_load = ph;
             if (ph->p_vaddr < vmin) vmin = ph->p_vaddr;
             size_t e = ph->p_vaddr + ph->p_memsz;
@@ -256,6 +540,7 @@ int main(int argc, const char **argv, const char **envp) {
         }
     }
     if (!first_load || vmax <= vmin) invalid_elf("ld.so has no loadable segments");
+    if (!entry_in_executable_segment) invalid_elf("ld.so entry is not executable");
     vmin = page_down(vmin, page);
     vmax = page_up(vmax, page);
     if (vmax <= vmin || vmax - vmin > SIZE_MAX - max_align)
@@ -273,6 +558,8 @@ int main(int argc, const char **argv, const char **envp) {
         size_t off_a = page_down(ph->p_offset, page);
         size_t va_a  = page_down(ph->p_vaddr, page);
         size_t diff  = ph->p_offset - off_a;
+        if (ph->p_filesz > SIZE_MAX - diff)
+            invalid_elf("ld.so segment map size overflow");
         size_t mapsz = page_up(ph->p_filesz + diff, page);
         int prot = 0;
         if (ph->p_flags & PF_R) prot |= PROT_READ;
@@ -336,12 +623,20 @@ int main(int argc, const char **argv, const char **envp) {
 
     size_t plat_addr = PUSH_STR("aarch64");
     uint8_t rnd[16];
-    int ufd = open("/dev/urandom", O_RDONLY);
-    if (ufd >= 0) { read(ufd, rnd, 16); close(ufd); } else memset(rnd, 0x42, 16);
+    fill_secure_random(rnd, sizeof(rnd));
     PUSH_BYTES(rnd, sizeof(rnd)); size_t rnd_addr = (size_t)sp;
 
-    size_t envc    = 0; while (envp[envc]) envc++;
-    size_t new_argc = (size_t)argc + 3;
+    size_t envc = 0;
+    while (envp[envc]) {
+        if (envc >= MAX_ENV) die("environment too large (limit 4096)");
+        envc++;
+    }
+    int trace_mode = argc > 1 && strcmp(argv[1], trace_marker) == 0;
+    size_t user_arg_start = trace_mode ? 2 : 1;
+    size_t user_arg_count = (size_t)argc - user_arg_start;
+    int use_proc_exe_shim = proc_exe_shim[0] != '\0';
+    size_t new_argc = 5 + (use_hwcaps_policy ? 2 : 0) +
+        (use_proc_exe_shim ? 2 : 0) + user_arg_count;
 
     if (new_argc >= MAX_ARGS) {
         die("too many arguments (limit 4096)");
@@ -351,20 +646,57 @@ int main(int argc, const char **argv, const char **envp) {
     }
 
     size_t argv_a[MAX_ARGS];
-    argv_a[0] = PUSH_STR(ldso);
-    argv_a[1] = PUSH_STR("--library-path");
-    argv_a[2] = PUSH_STR(library_path);
-    argv_a[3] = PUSH_STR(target_exe);
-    for (size_t i = 1; i < (size_t)argc; i++) argv_a[i + 3] = PUSH_STR(argv[i]);
-    size_t execfn = argv_a[3];
+    size_t argv_out = 0;
+    argv_a[argv_out++] = PUSH_STR(ldso);
+    argv_a[argv_out++] = PUSH_STR("--inhibit-cache");
+    if (use_hwcaps_policy) {
+        argv_a[argv_out++] = PUSH_STR("--glibc-hwcaps-mask");
+        argv_a[argv_out++] = PUSH_STR(hwcaps_mask);
+    }
+    argv_a[argv_out++] = PUSH_STR("--library-path");
+    argv_a[argv_out++] = PUSH_STR(library_path);
+    if (use_proc_exe_shim) {
+        argv_a[argv_out++] = PUSH_STR("--preload");
+        argv_a[argv_out++] = PUSH_STR(proc_exe_shim);
+    }
+    argv_a[argv_out++] = PUSH_STR(target_exe);
+    size_t execfn = argv_a[argv_out - 1];
+    for (size_t i = 0; i < user_arg_count; i++)
+        argv_a[argv_out++] = PUSH_STR(argv[i + user_arg_start]);
+    if (argv_out != new_argc) invalid_elf("synthetic argv count mismatch");
 
     size_t envp_a[MAX_ENV];
     size_t env_out = 0;
+    int has_ssl_cert_file = 0;
     for (size_t i = 0; i < envc; i++) {
-        if (strncmp(envp[i], "LD_PRELOAD=", 11) == 0) continue;
-        if (strncmp(envp[i], "LD_LIBRARY_PATH=", 16) == 0) continue;
+        if (has_env_name(envp[i], "SSL_CERT_FILE")) has_ssl_cert_file = 1;
+        if (has_env_name(envp[i], "LD_PRELOAD") ||
+            has_env_name(envp[i], "LD_LIBRARY_PATH") ||
+            has_env_name(envp[i], "GLIBC_LD_LIBRARY_PATH") ||
+            has_env_name(envp[i], "LD_AUDIT") ||
+            has_env_name(envp[i], "LD_DEBUG") ||
+            has_env_name(envp[i], "LD_DEBUG_OUTPUT") ||
+            has_env_name(envp[i], "LD_PROFILE") ||
+            has_env_name(envp[i], "GLIBC_TUNABLES") ||
+            strncmp(envp[i], "GLIBCX_", 7) == 0)
+            continue;
         if (env_out >= MAX_ENV) die("environment too large (limit 4096)");
         envp_a[env_out++] = PUSH_STR(envp[i]);
+    }
+    const char *internal_env[] = {
+        env_real_exe, env_wrapper_exe, env_app_id, env_proc_mode, env_tunables
+    };
+    for (size_t i = 0; i < sizeof(internal_env) / sizeof(internal_env[0]); i++) {
+        if (env_out >= MAX_ENV) die("environment too large (limit 4096)");
+        envp_a[env_out++] = PUSH_STR(internal_env[i]);
+    }
+    if (!has_ssl_cert_file && access(ssl_cert_path, R_OK) == 0) {
+        if (env_out >= MAX_ENV) die("environment too large (limit 4096)");
+        envp_a[env_out++] = PUSH_STR(env_ssl_cert);
+    }
+    if (trace_mode) {
+        if (env_out >= MAX_ENV) die("environment too large (limit 4096)");
+        envp_a[env_out++] = PUSH_STR("LD_DEBUG=libs,files,versions");
     }
 
     /* Build auxv first so auxc is known for alignment calculation */
@@ -402,6 +734,7 @@ int main(int argc, const char **argv, const char **envp) {
     PUSH_BYTES(&zero, 8);
     for (int i = (int)new_argc - 1; i >= 0; i--) PUSH_BYTES(&argv_a[i], 8);
     PUSH_BYTES(&new_argc, 8);
+    if (((size_t)sp & 15) != 0) invalid_elf("synthetic AArch64 stack is misaligned");
 
     __asm__ volatile(
         "mov sp, %[sp]\n"
@@ -420,21 +753,196 @@ int main(int argc, const char **argv, const char **envp) {
 }
 C_CODE
 
-    echo "[glibcx] Compiling native wrapper (C userland-exec, Bionic-linked)..."
-    if ! clang -O2 "$wrapper_c" -o "$wrapper_tmp" 2>&1; then
+    if [[ "$verbose" == true ]]; then
+        echo "[glibcx] Compiling native Bionic-linked userland-exec wrapper."
+    fi
+    if ! clang -O2 -Wall -Wextra -Werror -fstack-protector-strong \
+        "$wrapper_c" -o "$wrapper_bin" 2>&1; then
         echo "[glibcx] Error: Compilation failed. Is 'clang' installed?" >&2
-        rm -f "$wrapper_c"
-        rm -f "$wrapper_tmp"
+        rm -rf "${staging_dir:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
         exit 1
     fi
     rm -f "$wrapper_c"
-    mv -f "$wrapper_tmp" "$wrapper_bin"
+    chmod 700 "$wrapper_bin"
 
-    # --- 5. Registry entry (keyed by full path) --------------------------------
-    json_update_entry "$target_bin" "$orig_hash" "$patched_fp" "$max_req_glibc"
+    local wrapper_hash target_size manifest_with_generation
+    wrapper_hash=$(_sha256_file "$wrapper_bin")
+    target_size=$(LC_ALL=C stat -c '%s' "$target_bin")
+    if ! state_write_patch_manifest \
+        "${staging_dir}/manifest.json" "$app_id" "$target_bin" "$orig_hash" \
+        "$target_size" "$patched_fp" "$interpreter" "$max_req_glibc" \
+        "$needed_libs" "$final_wrapper" "$wrapper_hash" "$library_path" "$inspection" \
+        "$profile_json" "$verification_json" "$dependencies_json" "$repository_json" \
+        "$proc_exe_mode"; then
+        echo "[glibcx] Error: failed to create the app manifest." >&2
+        rm -rf "${staging_dir:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        exit 1
+    fi
+    chmod 600 "${staging_dir}/manifest.json"
 
-    echo "[glibcx] Registered '$bin_name'. Wrapper: $wrapper_bin"
-    echo "[glibcx] Add ~/.glibcx/bin to PATH if not already (run 'glibcx setup')."
+    # Publish an immutable generation, then switch only the current symlink.
+    # The previous generation remains intact and is restored on any later
+    # publication failure.
+    generation_number=$(state_next_generation_locked "$app_id")
+    manifest_with_generation=$(mktemp "${staging_dir}/.manifest.generation.XXXXXX")
+    if ! jq --argjson generation "$generation_number" '.generation = $generation' \
+        "${staging_dir}/manifest.json" >"$manifest_with_generation"; then
+        rm -f "$manifest_with_generation"
+        rm -rf "${staging_dir:?}"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        echo "[glibcx] Error: failed to finalize the app generation manifest." >&2
+        exit 1
+    fi
+    mv "$manifest_with_generation" "${staging_dir}/manifest.json"
+    chmod 600 "${staging_dir}/manifest.json"
+    generation_dir="${generations_dir}/${generation_number}"
+    if ! mv "$staging_dir" "$generation_dir"; then
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        echo "[glibcx] Error: failed to publish app generation." >&2
+        exit 1
+    fi
+    registry_snapshot=$(mktemp "${CLI_STORAGE}/.registry.rollback.XXXXXX")
+    cp -p "$REGISTRY_FILE" "$registry_snapshot"
+    if ! _state_atomic_symlink "generations/${generation_number}" "$current_link"; then
+        rm -rf "${generation_dir:?}"
+        rm -f "$registry_snapshot"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        echo "[glibcx] Error: failed to activate app generation." >&2
+        exit 1
+    fi
+
+    if ! state_register_app_locked "$target_bin" "$app_id" "$(state_current_manifest_path "$app_id")"; then
+        if [[ -n "$previous_current" ]]; then
+            _state_atomic_symlink "$previous_current" "$current_link" || true
+        else
+            rm -f "$current_link"
+        fi
+        rm -rf "${generation_dir:?}"
+        rm -f "$registry_snapshot"
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        echo "[glibcx] Error: failed to update the registry." >&2
+        exit 1
+    fi
+    if ! state_refresh_aliases_locked "$bin_name" "$replace_legacy_alias"; then
+        _state_commit_temp "$registry_snapshot" "$REGISTRY_FILE"
+        registry_snapshot=""
+        if [[ -n "$previous_current" ]]; then
+            _state_atomic_symlink "$previous_current" "$current_link" || true
+        else
+            rm -f "$current_link"
+        fi
+        rm -rf "${generation_dir:?}"
+        state_refresh_aliases_locked "$bin_name" false || true
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        echo "[glibcx] Error: app state was published, but aliases could not be refreshed." >&2
+        exit 1
+    fi
+    rm -f "$registry_snapshot"
+
+    lock_release "$app_lock"
+    lock_release "$registry_lock"
+    lock_release "$target_lock"
+
+    echo "[glibcx] Ready · $bin_name → $app_id · generation $generation_number"
+    if [[ "$verbose" == true ]]; then
+        echo "[glibcx] Wrapper: $final_wrapper (run 'glibcx setup' if ~/.glibcx/bin is not on PATH)"
+    fi
+}
+
+cmd_rollback() {
+    local target_bin="${1:-}" requested_generation="${2:-}"
+    [[ -n "$target_bin" ]] || {
+        echo "Usage: glibcx rollback <binary_path> [generation]" >&2
+        return 1
+    }
+    init_env
+    target_bin="$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")"
+    if [[ "$target_bin" == "${BIN_DIR}/"* ]]; then
+        local alias_target
+        alias_target=$(state_target_for_alias "$(basename "$target_bin")" 2>/dev/null || true)
+        [[ -n "$alias_target" ]] && target_bin="$alias_target"
+    fi
+
+    local app_id app_root current_link current_target generation_number generation_dir
+    local target_lock registry_lock app_lock registry_snapshot bin_name
+    app_id=$(state_get_app_id "$target_bin")
+    [[ -n "$app_id" ]] || {
+        echo "[glibcx] Error: '$target_bin' is not registered." >&2
+        return 1
+    }
+    bin_name=$(basename "$target_bin")
+    app_root=$(state_app_root "$app_id")
+    current_link="${app_root}/current"
+
+    lock_acquire target_lock "$(lock_target_name "$target_bin")"
+    lock_acquire registry_lock registry
+    lock_acquire app_lock "$(lock_app_name "$app_id")"
+    current_target=$(readlink "$current_link" 2>/dev/null || true)
+    if [[ ! "$current_target" =~ ^generations/[1-9][0-9]*$ ]]; then
+        echo "[glibcx] Error: current app generation is invalid." >&2
+        lock_release "$app_lock"; lock_release "$registry_lock"; lock_release "$target_lock"
+        return 1
+    fi
+
+    if [[ -n "$requested_generation" ]]; then
+        [[ "$requested_generation" =~ ^[1-9][0-9]*$ ]] || {
+            echo "[glibcx] Error: generation must be a positive integer." >&2
+            lock_release "$app_lock"; lock_release "$registry_lock"; lock_release "$target_lock"
+            return 1
+        }
+        generation_number=$((10#$requested_generation))
+    else
+        generation_number=$(find "${app_root}/generations" -mindepth 1 -maxdepth 1 -type d \
+            -printf '%f\n' | awk -v current="${current_target##*/}" \
+                '/^[1-9][0-9]*$/ && ($0 + 0) < (current + 0) {print}' \
+            | LC_ALL=C sort -nr | sed -n '1p')
+    fi
+    generation_dir="${app_root}/generations/${generation_number}"
+    if [[ -z "$generation_number" || ! -d "$generation_dir" \
+        || "generations/${generation_number}" == "$current_target" \
+        || ! -x "${generation_dir}/wrapper" ]] \
+        || ! jq -e --arg id "$app_id" --arg path "$target_bin" \
+            --argjson generation "$generation_number" '
+                .schema == 3 and .generation == $generation
+                and .app_id == $id and .target.path == $path
+            ' "${generation_dir}/manifest.json" >/dev/null 2>&1; then
+        echo "[glibcx] Error: no valid non-current generation '${generation_number:-<none>}' is available." >&2
+        lock_release "$app_lock"; lock_release "$registry_lock"; lock_release "$target_lock"
+        return 1
+    fi
+
+    registry_snapshot=$(mktemp "${CLI_STORAGE}/.registry.rollback.XXXXXX")
+    cp -p "$REGISTRY_FILE" "$registry_snapshot"
+    if ! _state_atomic_symlink "generations/${generation_number}" "$current_link" \
+        || ! state_register_app_locked "$target_bin" "$app_id" "$(state_current_manifest_path "$app_id")" \
+        || ! state_refresh_aliases_locked "$bin_name" false; then
+        _state_atomic_symlink "$current_target" "$current_link" || true
+        _state_commit_temp "$registry_snapshot" "$REGISTRY_FILE"
+        registry_snapshot=""
+        state_refresh_aliases_locked "$bin_name" false || true
+        lock_release "$app_lock"; lock_release "$registry_lock"; lock_release "$target_lock"
+        echo "[glibcx] Error: rollback publication failed; the previous generation was restored." >&2
+        return 1
+    fi
+    rm -f "$registry_snapshot"
+    lock_release "$app_lock"; lock_release "$registry_lock"; lock_release "$target_lock"
+    echo "[glibcx] Rolled back '$bin_name' to generation $generation_number."
 }
 
 cmd_restore() {
@@ -446,18 +954,43 @@ cmd_restore() {
     fi
     target_bin="$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")"
 
-    local orig_hash
-    orig_hash=$(json_get_val "$target_bin" "orig_hash")
-    if [[ -z "$orig_hash" ]]; then
+    local app_id
+    app_id=$(state_get_app_id "$target_bin")
+    if [[ -z "$app_id" ]]; then
         echo "[glibcx] Error: '$target_bin' is not in the registry." >&2
         exit 1
     fi
 
     local bin_name
     bin_name="$(basename "$target_bin")"
+    local target_lock registry_lock app_lock short_alias app_wrapper
+    lock_acquire target_lock "$(lock_target_name "$target_bin")"
+    lock_acquire registry_lock registry
+    lock_acquire app_lock "$(lock_app_name "$app_id")"
 
-    rm -f "${CLI_STORAGE}/bin/${bin_name}"
-    json_delete_entry "$target_bin"
+    # Recheck after acquiring locks in case another process removed it first.
+    if [[ "$(state_get_app_id "$target_bin")" != "$app_id" ]]; then
+        lock_release "$app_lock"
+        lock_release "$registry_lock"
+        lock_release "$target_lock"
+        echo "[glibcx] Error: registry entry changed while waiting for its lock." >&2
+        exit 1
+    fi
+
+    short_alias="${BIN_DIR}/${bin_name}"
+    app_wrapper=$(state_current_wrapper_path "$app_id")
+    if [[ -f "$short_alias" && ! -L "$short_alias" && -f "$app_wrapper" ]] \
+        && [[ "$(_sha256_file "$short_alias")" == "$(_sha256_file "$app_wrapper")" ]]; then
+        rm -f "$short_alias"
+    fi
+
+    state_delete_app_locked "$target_bin"
+    state_remove_app_files_locked "$app_id"
+    state_refresh_aliases_locked "$bin_name" false
+
+    lock_release "$app_lock"
+    lock_release "$registry_lock"
+    lock_release "$target_lock"
     echo "[glibcx] Unpatched '$target_bin' by removing its wrapper."
 }
 
@@ -492,6 +1025,37 @@ cmd_list() {
 
 cmd_clean() {
     init_env
+    if [[ "${1:-}" == "--cache" ]]; then
+        local cache_entry confirmation cache_entries
+        echo "[glibcx] Package-cache deletion set:"
+        cache_entries=$(find "${CACHE_DIR}/apt" "${CACHE_DIR}/packages" \
+            -mindepth 1 -maxdepth 1 -print 2>/dev/null || true)
+        if [[ -z "$cache_entries" ]]; then
+            echo "  (empty)"
+            return 0
+        fi
+        sed 's/^/  /' <<<"$cache_entries"
+        printf "[glibcx] Delete this cache? Type 'yes' to confirm: "
+        if ! read -r confirmation; then
+            echo
+            echo "[glibcx] Cache deletion cancelled (no confirmation input)."
+            return 1
+        fi
+        if [[ "$confirmation" != "yes" ]]; then
+            echo "[glibcx] Cache deletion cancelled."
+            return 1
+        fi
+        while IFS= read -r cache_entry; do
+            [[ "$cache_entry" == "${CACHE_DIR}/apt/"* \
+                || "$cache_entry" == "${CACHE_DIR}/packages/"* ]] || continue
+            rm -rf "${cache_entry:?}"
+        done <<<"$cache_entries"
+        echo "[glibcx] Package cache removed. Active app state was not changed."
+        return 0
+    elif [[ $# -gt 0 ]]; then
+        echo "Usage: glibcx clean [--cache]" >&2
+        return 1
+    fi
     echo "[glibcx] Scanning registry for stale entries..."
     local stale=0
     while IFS= read -r path; do
@@ -500,9 +1064,11 @@ cmd_clean() {
             local bin_name
             bin_name="$(basename "$path")"
             echo "[glibcx] Removing stale entry: $path"
-            rm -f "${CLI_STORAGE}/bin/${bin_name}"
-            json_delete_entry "$path"
-            stale=$((stale + 1))
+            if (cmd_restore "$path"); then
+                stale=$((stale + 1))
+            else
+                echo "[glibcx] Warning: could not remove stale entry: $path" >&2
+            fi
         fi
     done < <(json_list_paths)
     if [[ "$stale" -eq 0 ]]; then
@@ -520,16 +1086,13 @@ cmd_info() {
         exit 1
     fi
     target_bin="$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")"
-    if command -v jq >/dev/null 2>&1; then
-        jq --arg p "$target_bin" '.[$p] // empty' "$REGISTRY_FILE"
-    else
-        python3 -c '
-import json, sys
-f, path = sys.argv[1:3]
-with open(f) as fh: data = json.load(fh)
-import pprint; pprint.pprint(data.get(path, {}))
-' "$REGISTRY_FILE" "$target_bin"
+    local manifest_path
+    manifest_path=$(state_get_manifest_path "$target_bin")
+    if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+        echo "[glibcx] Error: '$target_bin' is not in the registry." >&2
+        exit 1
     fi
+    jq . "$manifest_path"
 }
 
 cmd_upgrade() {
@@ -540,12 +1103,16 @@ cmd_upgrade() {
         exit 1
     fi
     target_bin="$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")"
-    if [[ -z "$(json_get_val "$target_bin" "orig_hash")" ]]; then
+    local manifest_path profile_id proc_exe_mode
+    manifest_path=$(state_get_manifest_path "$target_bin")
+    if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
         echo "[glibcx] Error: '$target_bin' is not in the registry. Use 'glibcx patch' first." >&2
         exit 1
     fi
+    profile_id=$(jq -r '.runtime.profile_id' "$manifest_path")
+    proc_exe_mode=$(jq -r '.wrapper.proc_exe_mode // "off"' "$manifest_path")
     echo "[glibcx] Re-patching '$target_bin'..."
-    cmd_patch "$target_bin"
+    cmd_patch "$target_bin" --runtime "$profile_id" --proc-exe="$proc_exe_mode"
 }
 
 cmd_run() {
@@ -556,10 +1123,33 @@ cmd_run() {
     fi
     shift
     [[ "${1:-}" == "--" ]] && shift
-    # Scrub Bionic-injected vars before handing off to the glibc loader.
-    # LD_PRELOAD from Termux (libtermux-exec-ld-preload.so) is a Bionic
-    # library — the glibc ld.so will crash with "version 'LIBC' not found"
-    # if it tries to load it. Same for LD_LIBRARY_PATH pointing at Bionic dirs.
-    exec env -u LD_PRELOAD -u LD_LIBRARY_PATH \
-        "$GLIBC_INTERPRETER" --library-path "$GLIBC_LIB_DIR" "$target_bin" "$@"
+    target_bin=$(realpath "$target_bin" 2>/dev/null || echo "$target_bin")
+    local app_id manifest_path wrapper_path
+    if [[ ! -f "$REGISTRY_FILE" ]] \
+        || ! jq -e '.schema == 3 and (.apps | type) == "object"' \
+            "$REGISTRY_FILE" >/dev/null 2>&1; then
+        echo "[glibcx] Error: no valid schema-3 registry; patch the target first." >&2
+        exit 1
+    fi
+    app_id=$(state_get_app_id "$target_bin")
+    manifest_path=$(state_get_manifest_path "$target_bin")
+    if [[ -z "$app_id" || -z "$manifest_path" || ! -f "$manifest_path" ]]; then
+        echo "[glibcx] Error: '$target_bin' is not registered; patch it first." >&2
+        exit 1
+    fi
+    wrapper_path=$(jq -r '.wrapper.path // empty' "$manifest_path")
+    if [[ ! -x "$wrapper_path" ]]; then
+        echo "[glibcx] Error: registered wrapper is missing or not executable." >&2
+        exit 1
+    fi
+    exec env \
+        -u LD_PRELOAD \
+        -u LD_LIBRARY_PATH \
+        -u GLIBC_LD_LIBRARY_PATH \
+        -u LD_AUDIT \
+        -u LD_DEBUG \
+        -u LD_DEBUG_OUTPUT \
+        -u LD_PROFILE \
+        -u GLIBC_TUNABLES \
+        "$wrapper_path" "$@"
 }

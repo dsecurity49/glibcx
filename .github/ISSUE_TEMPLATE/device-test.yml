@@ -1,0 +1,27 @@
+name: Device test result
+description: Upload a report from the Android device test
+title: "[device test] report"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run `bash ci/android_device_matrix.sh`, inspect the generated archive,
+        then attach it below. A workflow will read the report and fill in the
+        commit, device, Android version, page size, test results, and SHA-256.
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Device report
+      description: Drag one glibcx-device-report tar.gz archive into this field.
+      placeholder: Drop the archive here and wait for its link to appear.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I inspected the archive and am comfortable sharing its contents publicly.
+          required: true

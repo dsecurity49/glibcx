@@ -1,138 +1,101 @@
 GLIBC_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}/glibc"
 GLIBC_INTERPRETER="${GLIBC_PREFIX}/lib/ld-linux-aarch64.so.1"
 GLIBC_LIB_DIR="${GLIBC_PREFIX}/lib"
+
 CLI_STORAGE="${HOME:-/data/data/com.termux/files/home}/.glibcx"
 REGISTRY_FILE="${CLI_STORAGE}/registry.json"
+APPS_DIR="${CLI_STORAGE}/apps"
+BIN_DIR="${CLI_STORAGE}/bin"
+CACHE_DIR="${CLI_STORAGE}/cache"
+LOCK_DIR="${CLI_STORAGE}/locks"
+LOG_DIR="${CLI_STORAGE}/logs"
+TMP_DIR="${CLI_STORAGE}/tmp"
+PROFILE_STATE_DIR="${CLI_STORAGE}/profiles"
+RUNTIME_ROOT="${PREFIX:-/data/data/com.termux/files/usr}/opt/glibcx/runtimes"
+STATE_SCHEMA=3
+GLIBCX_VERSION="0.3.0"
+PROFILE_COMPATIBILITY_SCHEMA=2
 
-# Registry schema (per blueprint):
-#   key   = absolute binary_path
-#   value = { orig_hash, patched_fingerprint, glibc_required, patched_at }
+# Release trust is pinned to the public key produced by the offline production
+# ceremony. Fixture tests override these shell variables only after sourcing
+# the modules.
+RUNTIME_CATALOG_URL="https://github.com/dsecurity49/glibcx/releases/latest/download/glibcx-profiles-v1.json"
+RUNTIME_CATALOG_SIGNATURE_URL="${RUNTIME_CATALOG_URL}.asc"
+RUNTIME_RELEASE_KEYRING="${PREFIX:-/data/data/com.termux/files/usr}/share/glibcx/keys/glibcx-release.gpg"
+RUNTIME_RELEASE_PRIMARY_FINGERPRINT="EB13DBFA9354A55285CF4B03B5255ACD0708C45E"
+RUNTIME_TEST_ALLOW_LOCAL_ASSETS=false
 
-init_env() {
-    mkdir -p "${CLI_STORAGE}/bin" "${CLI_STORAGE}/storage" "${CLI_STORAGE}/logs" "${CLI_STORAGE}/opt"
-    if [[ ! -f "$REGISTRY_FILE" ]]; then
-        echo "{}" > "$REGISTRY_FILE"
+TERMUX_GLIBC_REPOSITORY="https://packages-cf.termux.dev/apt/termux-glibc"
+TERMUX_GLIBC_DISTRIBUTION="glibc"
+TERMUX_GLIBC_COMPONENT="stable"
+TERMUX_GLIBC_KEYRING="${PREFIX:-/data/data/com.termux/files/usr}/etc/apt/trusted.gpg.d/termux-autobuilds.gpg"
+TERMUX_GLIBC_KEY_FINGERPRINT="CC72CF8BA7DBFA0182877D045A897D96E57CF20C"
+RESOLVER_TEST_ALLOW_LOCAL_REPOSITORY=false
+
+_require_command() {
+    local command_name="$1" package_name="${2:-$1}"
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        echo "[glibcx] Error: required command '$command_name' is missing." >&2
+        echo "[glibcx] Install it with: pkg install $package_name" >&2
+        return 1
     fi
 }
 
-# Drift fingerprint: file identity + size + mtime + ctime.  This catches
+init_env() {
+    _require_command jq jq
+    _require_command flock util-linux
+
+    umask 077
+    mkdir -p \
+        "$APPS_DIR" \
+        "$BIN_DIR" \
+        "${CACHE_DIR}/apt" \
+        "${CACHE_DIR}/packages" \
+        "$LOCK_DIR" \
+        "$LOG_DIR" \
+        "$TMP_DIR" \
+        "$PROFILE_STATE_DIR" \
+        "${CLI_STORAGE}/storage" \
+        "${CLI_STORAGE}/opt"
+
+    state_initialize
+}
+
+_utc_timestamp() {
+    date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u
+}
+
+_timestamp_slug() {
+    date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date -u '+%s'
+}
+
+_sha256_file() {
+    LC_ALL=C sha256sum "$1" | LC_ALL=C awk '{print $1}'
+}
+
+_sha256_text() {
+    printf '%s' "$1" | LC_ALL=C sha256sum | LC_ALL=C awk '{print $1}'
+}
+
+_sanitize_basename() {
+    local sanitized
+    sanitized=$(printf '%s' "$1" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/_/g; s/^[-.]*//; s/[-.]*$//')
+    sanitized="${sanitized:0:64}"
+    if [[ -z "$sanitized" ]]; then
+        sanitized="app"
+    fi
+    printf '%s\n' "$sanitized"
+}
+
+# Drift fingerprint: file identity + size + mtime + ctime. This catches
 # in-place rewrites even when an updater preserves the original mtime.
 _fingerprint() {
-    stat -c '%d_%i_%s_%Y_%Z' "$1" 2>/dev/null || echo "missing"
+    LC_ALL=C stat -c '%d_%i_%s_%Y_%Z' "$1" 2>/dev/null || echo "missing"
 }
 
 # Return success only for an AArch64 ELF. Providers use this before offering a
 # downloaded executable to cmd_patch, so a mixed-architecture archive does not
 # abort an otherwise usable install.
 _is_aarch64_elf() {
-    file "$1" 2>/dev/null | grep -qE 'ELF 64-bit LSB.*(aarch64|ARM aarch64)'
-}
-
-# json_update_entry <binary_path> <orig_hash> <patched_fp> <glibc_required>
-json_update_entry() {
-    local path="$1" orig="$2" fp="$3" glibc="$4"
-    local ts
-    ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u)
-    if command -v jq >/dev/null 2>&1; then
-        local tmp
-        tmp="$(mktemp)"
-        jq --arg path "$path" --arg orig "$orig" --arg fp "$fp" \
-           --arg glibc "$glibc" --arg ts "$ts" \
-           '.[$path] = {orig_hash: $orig, patched_fingerprint: $fp, glibc_required: $glibc, patched_at: $ts}' \
-           "$REGISTRY_FILE" > "$tmp"
-        mv "$tmp" "$REGISTRY_FILE"
-    else
-        python3 -c '
-import json, sys, datetime
-f, path, orig, fp, glibc = sys.argv[1:6]
-try:
-    with open(f) as fh: data = json.load(fh)
-except Exception: data = {}
-data[path] = {
-    "orig_hash": orig,
-    "patched_fingerprint": fp,
-    "glibc_required": glibc,
-    "patched_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-}
-with open(f, "w") as fh: json.dump(data, fh, indent=2)
-' "$REGISTRY_FILE" "$path" "$orig" "$fp" "$glibc"
-    fi
-}
-
-json_delete_entry() {
-    local path="$1"
-    if command -v jq >/dev/null 2>&1; then
-        local tmp
-        tmp="$(mktemp)"
-        jq --arg p "$path" 'del(.[$p])' "$REGISTRY_FILE" > "$tmp"
-        mv "$tmp" "$REGISTRY_FILE"
-    else
-        python3 -c '
-import json, sys
-f, path = sys.argv[1:3]
-try:
-    with open(f) as fh: data = json.load(fh)
-    data.pop(path, None)
-    with open(f, "w") as fh: json.dump(data, fh, indent=2)
-except Exception: pass
-' "$REGISTRY_FILE" "$path"
-    fi
-}
-
-# json_get_val <binary_path> <field>
-json_get_val() {
-    local path="$1" key="$2"
-    if command -v jq >/dev/null 2>&1; then
-        jq -r --arg p "$path" '.[$p]['"\"$key\""'] // empty' "$REGISTRY_FILE" 2>/dev/null || echo ""
-    else
-        python3 -c '
-import json, sys
-f, path, key = sys.argv[1:4]
-try:
-    with open(f) as fh: data = json.load(fh)
-    print(data.get(path, {}).get(key, ""))
-except Exception: print("")
-' "$REGISTRY_FILE" "$path" "$key"
-    fi
-}
-
-# json_list_entries — prints human-readable table
-json_list_entries() {
-    if command -v jq >/dev/null 2>&1; then
-        jq -r 'to_entries[]
-            | "  \(.key)\n    glibc required : \(.value.glibc_required)\n    patched at     : \(.value.patched_at)\n    fingerprint    : \(.value.patched_fingerprint)"' \
-            "$REGISTRY_FILE"
-    else
-        python3 -c '
-import json, sys
-f = sys.argv[1]
-try:
-    with open(f) as fh: data = json.load(fh)
-    if not data:
-        print("  No patched binaries registered.")
-    for path, v in data.items():
-        print(f"  {path}")
-        print(f"    glibc required : {v.get(\"glibc_required\", \"\")}")
-        print(f"    patched at     : {v.get(\"patched_at\", \"\")}")
-        print(f"    fingerprint    : {v.get(\"patched_fingerprint\", \"\")}")
-except Exception:
-    print("  No patched binaries registered.")
-' "$REGISTRY_FILE"
-    fi
-}
-
-# json_list_paths — emit one absolute path per line (for iteration)
-json_list_paths() {
-    if command -v jq >/dev/null 2>&1; then
-        jq -r 'keys[]' "$REGISTRY_FILE" 2>/dev/null || true
-    else
-        python3 -c '
-import json, sys
-f = sys.argv[1]
-try:
-    with open(f) as fh: data = json.load(fh)
-    for k in data: print(k)
-except Exception: pass
-' "$REGISTRY_FILE"
-    fi
+    LC_ALL=C file "$1" 2>/dev/null | grep -qE 'ELF 64-bit LSB.*(aarch64|ARM aarch64)'
 }

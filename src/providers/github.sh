@@ -1,10 +1,35 @@
 cmd_gh() {
     local action="${1:-}"
     local repo="${2:-}"
+    shift 2 2>/dev/null || true
+    local runtime_request=""
     if [[ "$action" != "install" || -z "$repo" ]]; then
-        echo "Usage: glibcx gh install <owner/repo>" >&2
+        echo "Usage: glibcx gh install <owner/repo> [--runtime <id>]" >&2
         exit 1
     fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --runtime)
+                [[ $# -ge 2 ]] || { echo "[glibcx] Error: --runtime requires an ID." >&2; exit 1; }
+                runtime_request="$2"
+                shift 2
+                ;;
+            --runtime=*)
+                runtime_request="${1#*=}"
+                [[ -n "$runtime_request" ]] || { echo "[glibcx] Error: --runtime requires an ID." >&2; exit 1; }
+                shift
+                ;;
+            *)
+                echo "[glibcx] Error: unknown gh option '$1'." >&2
+                echo "Usage: glibcx gh install <owner/repo> [--runtime <id>]" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    local fetch_args=()
+    [[ -n "$runtime_request" ]] && fetch_args+=(--runtime "$runtime_request")
 
     init_env
     if ! command -v jq >/dev/null 2>&1; then
@@ -50,7 +75,7 @@ cmd_gh() {
     if [[ -n "$android_url" && "$android_url" != "null" ]]; then
         echo "[glibcx] Native Android asset found, skipping patch."
         echo "[glibcx] Selected asset: $android_url"
-        cmd_fetch "$android_url" "${repo##*/}"
+        cmd_fetch "$android_url" --name "${repo##*/}" "${fetch_args[@]}"
         return
     fi
 
@@ -83,5 +108,5 @@ cmd_gh() {
     fi
 
     echo "[glibcx] Selected glibc binary: $asset_url"
-    cmd_fetch "$asset_url" "${repo##*/}"
+    cmd_fetch "$asset_url" --name "${repo##*/}" "${fetch_args[@]}"
 }

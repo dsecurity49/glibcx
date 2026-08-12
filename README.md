@@ -2,155 +2,240 @@
 
 [![CI](https://github.com/dsecurity49/glibcx/actions/workflows/ci.yml/badge.svg)](https://github.com/dsecurity49/glibcx/actions/workflows/ci.yml)
 
-Patches and runs glibc-linked Linux ARM64 CLI tools natively under Termux's Bionic environment.
+Some command-line projects publish Linux AArch64 binaries but no Android
+build. The processor is right for an ARM64 phone, but the binary still expects
+glibc while Termux normally uses Android's Bionic libc.
 
-## How it works
+I wrote glibcx to run those binaries without setting up a complete Linux
+distribution. It leaves the original executable alone, builds a small native
+wrapper, and runs the program with the Android-patched glibc from the Termux
+glibc repository.
 
-1. The original binary remains untouched.
-2. A native AArch64 C wrapper is compiled that uses `mmap` to load the Termux glibc loader (`ld-linux-aarch64.so.1`).
-3. It jumps to the loader via inline assembly within the same process. No `execve` is called.
+This is useful for self-contained command-line tools. It is not a container or
+a Linux root filesystem. Programs that need system services, Linux users,
+special device layouts, or undeclared data files may still be better served by
+PRoot or another full environment.
 
-## Installation
+## Installing
+
+The signed installation format begins with v0.3.0. The commands below will
+work once that release appears on the
+[release page](https://github.com/dsecurity49/glibcx/releases). They download
+the installer and public key from one versioned release, compare the key with a
+fingerprint kept outside the download, verify the installer, and only then run
+it.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dsecurity49/glibcx/main/install.sh | bash
+pkg install -y curl gnupg
+
+tag=v0.3.0
+base="https://github.com/dsecurity49/glibcx/releases/download/${tag}"
+curl -fLO "$base/glibcx-release.gpg"
+curl -fLO "$base/install.sh"
+curl -fLO "$base/install.sh.asc"
+
+expected_fingerprint=EB13DBFA9354A55285CF4B03B5255ACD0708C45E
+observed_fingerprint=$(LC_ALL=C gpg --batch --show-keys --with-colons \
+  glibcx-release.gpg | LC_ALL=C awk -F: '$1 == "fpr" {print toupper($10); exit}')
+
+verification=$(LC_ALL=C gpgv --status-fd 1 --keyring ./glibcx-release.gpg \
+  install.sh.asc install.sh) \
+  && signer=$(LC_ALL=C awk '$2 == "VALIDSIG" {print toupper($3); exit}' \
+    <<<"$verification") \
+  && primary=$(LC_ALL=C awk '$2 == "VALIDSIG" {print toupper($NF); exit}' \
+    <<<"$verification") \
+  && test "$observed_fingerprint" = "$expected_fingerprint" \
+  && { test "$signer" = "$expected_fingerprint" \
+    || test "$primary" = "$expected_fingerprint"; } \
+  && bash install.sh
 ```
 
-Installs prerequisites via `pkg`, downloads the latest release binary, and configures your PATH.
+Restart the shell when the installer finishes, or reload its configuration.
+Then install the signed runtime selected for this version:
 
-**Prerequisites (installed automatically):** `glibc-runner`, `clang`, `jq`, `curl`, `file`, `binutils`, `nodejs`
+```bash
+source ~/.bashrc
+glibcx runtime install recommended
+```
 
-**Compatibility:** Manually tested on a non-rooted Android 12 Termux device.
-This is not a guarantee for every Android, Termux, glibc, or target-binary version.
+Use a versioned release as the installer source, not a copy from `main`. The
+`v0.3.0-dry-run.2` prerelease was made with a fixture key while testing the
+release machinery. It is deliberately not trusted by glibcx.
 
-## Limitations / Scope
+## Patching a binary
 
-- **Not a PRoot replacement.** This provides no isolated rootfs, no fake `/dev`, `/proc`, or `/sys`. It is strictly a glibc dynamic loader wrapper.
-- **Does not fetch external dependencies.** glibcx only resolves the glibc loader itself. Other non-glibc shared libraries (e.g., `libxml2` for hurl) are never downloaded automatically — they are flagged as warnings at patch time, and you must supply them yourself via `glibcx vendor <binary> <lib1.so> [lib2.so...]`, which copies them into the wrapper's library path (`~/.glibcx/lib/<binary>`). Without them the binary fails at runtime.
-- **Glibc version mismatches.** If a binary requires a newer `GLIBC_2.XX` symbol than what the Termux `glibc-repo` ships, it will fail at runtime. This is flagged at patch time.
-- **Path resolution.** Programs locating their assets relative to `/proc/self/exe` will resolve against the wrapper directory (`~/.glibcx/bin/`), not the real binary path, because the loader is entered in-process (no `execve`).
+Given a dynamically linked Linux ARM64 executable, `patch` inspects its ELF
+metadata, resolves its startup libraries, and creates a registered wrapper:
 
-## Features
+```bash
+glibcx patch ./tool-linux-arm64
+~/.glibcx/bin/tool-linux-arm64 --help
+```
 
-* **Direct execution:** Calls the glibc dynamic linker in-process and does not use PRoot-style ptrace/syscall interception.
-* **Clear scope:** Does not rely on PRoot's ptrace mechanism; Android and target-binary compatibility still varies by device and release.
-* **Strict target checks:** Refuses static, non-AArch64, and Android/Bionic binaries; native Bionic binaries should run directly.
-* **Drift detection:** Re-patch warnings if a binary is replaced or modified, even when an updater preserves its mtime.
-* **Page-size aware:** The launcher uses the device's runtime page size rather than assuming 4 KB. It is designed for 4 KB and 16 KB-page ARM64 devices; real 16 KB-device validation is still pending.
-* **Dep advisories:** Audits GLIBC version requirements and flags missing external shared libraries.
+`run` finds that registered wrapper without depending on
+`~/.glibcx/bin` being in `PATH`:
 
-## Usage
+```bash
+glibcx run ./tool-linux-arm64 -- --help
+```
 
-### GitHub Releases
+The wrapper records enough information to notice when the original file has
+changed. After an upstream self-update, publish a new generation with
+`upgrade`. If that generation is bad, switch back to an older one:
+
+```bash
+glibcx upgrade ./tool-linux-arm64
+glibcx rollback ./tool-linux-arm64
+```
+
+## Downloading a tool
+
+The provider commands find a likely executable and then use the same patching
+path:
 
 ```bash
 glibcx gh install sharkdp/fd
-glibcx gh install dandavison/delta
-glibcx gh install ast-grep/ast-grep
-glibcx gh install alexpasmantier/television
-```
-
-Checks for a native `android-arm64` release asset first and symlinks it directly if found. Otherwise, fetches the Linux `aarch64-linux-gnu` glibc asset and patches it, skipping musl, deb, rpm, and signature variants.
-
-### NPM packages
-
-```bash
 glibcx npm install @anthropic-ai/claude-code
-```
-
-Downloads the tarball directly to bypass npm's OS restrictions, verifies its registry-provided SHA-512 integrity before extraction, and checks for a native `android-arm64` optional dependency first.
-
-### Direct URL
-
-```bash
 glibcx fetch https://example.com/tool-linux-arm64.tar.gz
+glibcx intercept 'curl -fsSL https://example.com/install.sh | bash'
 ```
 
-### Install script interception
+The NPM provider verifies the tarball against the SHA-512 integrity value from
+the registry. The GitHub provider uses release assets over HTTPS, but glibcx
+cannot know each upstream project's signing policy. `gh install` is a
+downloader, not independent verification of the upstream release. The same
+applies to URLs and installer commands passed to `fetch` and `intercept`.
 
-Monitors common binary directories (`~/.local/bin`, `~/bin`, `~/.bun/bin`, `~/.cargo/bin`, `~/.deno/bin`, `$PREFIX/bin`) during any install script and auto-patches new or replaced glibc binaries while ignoring Bionic/native ones:
+## Commands worth knowing
+
+```text
+glibcx patch <path>                 inspect, resolve, verify, and register
+glibcx run <path> -- <args>         run through the registered wrapper
+glibcx upgrade <path>               patch a changed target into a new generation
+glibcx rollback <path> [generation] activate a retained generation
+glibcx restore <path>               remove glibcx state; leave the target alone
+glibcx list                         list registered targets and drift
+glibcx info <path>                  show one registry record
+glibcx doctor <path>                diagnose ELF, runtime, and loader problems
+glibcx deps <path>                  show the locked startup dependency graph
+glibcx trace-libs <path> -- <args>  observe libraries loaded while running
+glibcx vendor <path> <library>      add a DSO and rebuild the dependency lock
+glibcx runtime list                 list installed runtime profiles
+glibcx runtime verify <profile>     verify a runtime profile's inventory
+glibcx clean                        remove stale registrations
+glibcx self-update                  install the latest verified release
+```
+
+`glibcx help` has the complete list. Useful `patch` options include
+`--dry-run`, `--offline`, `--verbose`, `--runtime <profile>`, and
+`--proc-exe=auto|on|off`.
+
+## Compatibility
+
+The v0.3 managed runtime is built for Termux on AArch64, Android 12 through 16
+(API 31 through 36), and Linux 4.14 or newer. A target must be a dynamically
+linked, 64-bit little-endian AArch64 ELF using `ld-linux-aarch64.so.1` or
+`ld.so` as its interpreter.
+
+Static executables, Android/Bionic executables, other architectures, setuid
+programs, and unknown interpreters are rejected. A valid ELF can still require
+a newer glibc symbol than the selected runtime provides. Verification covers
+the libraries loaded at startup; it cannot predict a later plugin, raw syscall,
+or application-specific operation.
+
+Physical-device reports currently cover Android 12, 14, and 16 on vivo and
+Xiaomi phones with 4 KB pages. They show what passed on those exact devices and
+commits, not what every Android build will do. The
+[device-testing guide](docs/device-testing.md) contains the records and the
+script for adding another result.
+
+Older application results and benchmark measurements are kept in
+[How glibcx works](docs/how-it-works.md). They record exact v0.2 tests rather
+than making claims about current upstream versions.
+
+## When something fails
+
+Start with `glibcx doctor <path>`. It reads the target, runtime, dependency
+lock, and loader result without running the program or changing its state.
+
+If Termux cannot find `glibc-runner`, enable its repository before trying to
+install it:
 
 ```bash
-glibcx intercept 'curl -fsSL https://bun.sh/install | bash'
+pkg install -y glibc-repo
+pkg update -y
+pkg install -y glibc-runner
 ```
 
-### Manual patch
+An error containing `libc.so.6: version 'LIBC' not found` usually means that a
+Bionic preload reached glibc. v0.3 removes Termux's inherited loader variables
+in both the shell handoff and native wrapper. If the error returns, include the
+`doctor` output and device details in the bug report.
+
+PyInstaller and some other programs inspect `/proc/self/exe` for data appended
+to their executable. The default `--proc-exe=auto` enables the managed
+runtime's compatibility shim only for recognized targets. Turning it off can
+be useful while diagnosing a problem, but may make such a program inspect the
+wrapper instead of its original file.
+
+Offline mode can use installed profiles and previously verified cache entries.
+It cannot supply a runtime, repository index, or library that has never been
+downloaded.
+
+## Trust model
+
+The release key is stored at
+[`keys/glibcx-release.gpg`](keys/glibcx-release.gpg).
+
+- Primary fingerprint: `EB13 DBFA 9354 A552 85CF 4B03 B525 5ACD 0708 C45E`
+- Signing subkey: `2D0A D952 32D1 E58A D13E 6B23 C49A 0B44 BF9F 2613`
+
+The primary fingerprint is pinned in the installer and client. This matters
+because a key downloaded next to a signature cannot authenticate itself.
+OpenPGP signatures are the release trust root. Checksums, GitHub attestations,
+and immutable releases add useful evidence, but do not replace the pinned key.
+
+Runtime dependency downloads use an isolated APT configuration and the pinned
+Termux glibc repository key. `--force` does not disable signatures or hash
+checks. [How glibcx works](docs/how-it-works.md) describes the resolver,
+wrapper, state publication, and the limits of those checks.
+
+## Building from source
+
+The checked-in `glibcx` file is assembled from the modules under `src/`.
+`build.sh` writes `glibcx-bin` without replacing it.
 
 ```bash
-glibcx patch ./my-binary          # audit, register, compile wrapper
-glibcx run ./my-binary -- --help  # ephemeral trial run, no file changes
+pkg update -y
+pkg install -y git clang jq curl file binutils nodejs util-linux gnupg \
+  xz-utils patchelf gzip glibc-repo
+pkg update -y
+pkg install -y glibc-runner
+
+git clone https://github.com/dsecurity49/glibcx.git
+cd glibcx
+./build.sh
+cmp -s glibcx glibcx-bin && echo 'Source build matches.'
 ```
 
-### Management
+For development, the package-managed Termux glibc tree can be imported as the
+explicitly mutable `system` profile:
 
 ```bash
-glibcx list               # all managed binaries with drift/version status
-glibcx info <path>        # full registry entry
-glibcx restore <path>     # remove the wrapper and registry entry (alias: unpatch; the original binary is never modified)
-glibcx vendor <bin> <lib> # copy external .so files into the wrapper's library path
-glibcx upgrade <path>     # re-patch after a self-update
-glibcx clean              # remove registry entries for deleted binaries
-glibcx benchmark          # download 11 binaries and run 3-way speed comparison
-glibcx self-update [--force] # update glibcx to the latest release
+./glibcx runtime import-system
+./glibcx patch ./tool-linux-arm64 --runtime system
 ```
 
-## Reported compatibility
+That profile is a reference to files managed by `pkg`, not a signed immutable
+runtime. A package update can make its recorded inventory stale.
 
-The entries below are historical manual test results for the listed versions,
-not a guarantee for the latest release of each tool. A target can still fail if
-it needs a newer glibc symbol or an external shared library.
+## Documentation
 
-| Binary | GLIBC req | Notes |
-|---|---|---|
-| Claude Code 2.1.224 | GLIBC_2.17 | Auto-restart tested and works via `/proc/self/exe` |
-| Deno 2.9.5 | GLIBC_2.27 | Restart untested |
-| fd 10.0.0 | GLIBC_2.18 | |
-| ripgrep 15.2.0 | GLIBC_2.18 | |
-| bat 0.26.1 | GLIBC_2.18 | |
-| eza 0.23.5 | GLIBC_2.18 | |
-| delta 0.19.2 | GLIBC_2.18 | |
-| bottom 0.14.7 | GLIBC_2.34 | |
-| ast-grep 0.45.0 | GLIBC_2.18 | |
-| sg (ast-grep companion) | GLIBC_2.17 | |
-| jnv 0.7.1 | GLIBC_2.34 | |
-| television 0.15.9 | GLIBC_2.18 | |
-| cargo-binstall 1.21.1 | GLIBC_2.17 | |
-| cargo-llvm-cov 0.8.7 | GLIBC_2.34 | |
-| xplr 1.1.0 | GLIBC_2.39 | |
-| hurl 8.0.1 | GLIBC_2.34 | Requires vendoring `libxml2.so.2`, `libicuuc.so.72`, `libicudata.so.72` |
-
-## Benchmarking
-
-Run `glibcx benchmark` on your own device to compare compatible tools with
-Termux-native and PRoot alternatives. Results depend on the phone, Android and
-Termux versions, installed glibc, target tool, filesystem, dataset, and cache
-state.
-
-### Measured v0.2.0 result — one device
-
-Measured on a vivo V2022 (Android 12 / API 31) with Termux packages
-`ripgrep` 15.2.0, `fd` 10.4.2, `glibc-runner` 2.0-3 (GLIBC_2.43), and
-`proot-distro` 5.5.0 running Debian 13. glibcx used Linux ARM64 builds of
-ripgrep 15.2.0 and fd 10.4.2; Debian supplied ripgrep 14.1.1 and fdfind
-10.2.0.
-
-Each value is the average of three trials. Execution order rotated between
-glibcx, native Termux, and PRoot for each trial. Commands wrote output to
-`/dev/null`; the PRoot values include `proot-distro login` startup.
-
-| Dataset / command | glibcx | Native Termux | Debian PRoot |
-|---|---:|---:|---:|
-| 1,000 files / 4.1 MB — `rg -l MATCHME` | 0.149s | 0.149s | 2.283s |
-| 1,000 files / 4.1 MB — `fd -t f` | 0.116s | 0.121s | 1.029s |
-| 200 files / 5.9 MB — `rg -l MATCHME` | 0.082s | 0.084s | 0.893s |
-| 200 files / 5.9 MB — `fd -t f` | 0.083s | 0.076s | 0.724s |
-| 2,164 files / 23.7 MB — `rg -l MATCHME` | 0.112s | 0.113s | 1.310s |
-| 2,164 files / 23.7 MB — `fd -t f` | 0.098s | 0.080s | 0.756s |
-
-This is a device-specific measurement, not a performance guarantee. Re-run
-the benchmark on the target device and workload before making a deployment
-decision.
+- [How glibcx works](docs/how-it-works.md)
+- [Testing on Android](docs/device-testing.md)
+- [Release procedure](docs/releasing.md)
+- [Version history](CHANGELOG.md)
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)

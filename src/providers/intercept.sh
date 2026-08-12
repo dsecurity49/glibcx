@@ -8,11 +8,33 @@ _cleanup_intercept() {
 
 cmd_intercept() {
     local user_cmd="${1:-}"
+    shift || true
+    local runtime_request=""
     if [[ -z "$user_cmd" ]]; then
-        echo "Usage: glibcx intercept '<command>'" >&2
-        echo "Example: glibcx intercept 'curl -fsSL https://bun.sh/install | bash'" >&2
+        echo "Usage: glibcx intercept '<command>' [--runtime <id>]" >&2
+        echo "Example: glibcx intercept 'curl -fsSL https://bun.sh/install | bash' --runtime system" >&2
         exit 1
     fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --runtime)
+                [[ $# -ge 2 ]] || { echo "[glibcx] Error: --runtime requires an ID." >&2; exit 1; }
+                runtime_request="$2"
+                shift 2
+                ;;
+            --runtime=*)
+                runtime_request="${1#*=}"
+                [[ -n "$runtime_request" ]] || { echo "[glibcx] Error: --runtime requires an ID." >&2; exit 1; }
+                shift
+                ;;
+            *)
+                echo "[glibcx] Error: unknown intercept option '$1'." >&2
+                echo "Usage: glibcx intercept '<command>' [--runtime <id>]" >&2
+                exit 1
+                ;;
+        esac
+    done
 
     init_env
 
@@ -36,7 +58,8 @@ cmd_intercept() {
 
     echo "[glibcx] Taking pre-install snapshot of common bin directories..."
     for d in "${mon_dirs[@]}"; do
-        [[ -d "$d" ]] && find "$d" -type f -executable -exec stat -c "%n %Y" {} + 2>/dev/null >> "$existing_files" || true
+        [[ -d "$d" ]] && find "$d" -type f -executable \
+            -exec env LC_ALL=C stat -c "%n %Y" {} + 2>/dev/null >> "$existing_files" || true
     done
     sort -o "$existing_files" "$existing_files"
 
@@ -57,26 +80,29 @@ cmd_intercept() {
 
     echo "[glibcx] Taking post-install snapshot..."
     for d in "${mon_dirs[@]}"; do
-        [[ -d "$d" ]] && find "$d" -type f -executable -exec stat -c "%n %Y" {} + 2>/dev/null >> "$new_files" || true
+        [[ -d "$d" ]] && find "$d" -type f -executable \
+            -exec env LC_ALL=C stat -c "%n %Y" {} + 2>/dev/null >> "$new_files" || true
     done
     sort -o "$new_files" "$new_files"
 
     local found_any=0
+    local patch_args=()
+    [[ -n "$runtime_request" ]] && patch_args+=(--runtime "$runtime_request")
     echo "[glibcx] Inspecting new executables..."
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local bin="${line% *}"
-        if file "$bin" | grep -q "ELF 64-bit LSB"; then
+        if LC_ALL=C file "$bin" | grep -q "ELF 64-bit LSB"; then
             if ! _is_aarch64_elf "$bin"; then
                 echo "[glibcx] Ignored — non-AArch64 ELF: $bin"
                 continue
             fi
             found_any=1
             local needed_libs
-            needed_libs=$(readelf -d "$bin" 2>/dev/null | grep NEEDED || true)
+            needed_libs=$(LC_ALL=C readelf -W -d "$bin" 2>/dev/null | grep NEEDED || true)
             if echo "$needed_libs" | grep -qE "libc\.so\.6|ld-linux"; then
                 echo "[glibcx] Intercepted new glibc binary: $bin"
-                cmd_patch "$bin"
+                cmd_patch "$bin" "${patch_args[@]}"
             elif echo "$needed_libs" | grep -q "libc\.so"; then
                 echo "[glibcx] Ignored — Bionic/native binary (links Bionic libc.so): $bin"
             else

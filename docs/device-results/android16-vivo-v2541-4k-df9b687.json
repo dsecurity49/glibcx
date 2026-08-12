@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "tested_at": "2026-08-11T18:55:18Z",
+  "overall": "pass",
+  "source": {
+    "commit": "df9b68718ee838c344b17159399589f32ddb7ae7",
+    "tracked_changes": false
+  },
+  "device": {
+    "android_release": "16",
+    "sdk": 36,
+    "manufacturer": "vivo",
+    "model": "V2541",
+    "abi": "arm64-v8a",
+    "kernel_release": "5.15.197-android13-8-00025-g1d041f251b70-ab15471564",
+    "page_size": 4096,
+    "selinux": "unknown"
+  },
+  "termux": {
+    "apk_release": "F_DROID",
+    "version": "0.119.0-beta.3",
+    "target_sdk": 28,
+    "termux_tools_version": "1.46.0+really1.45.0-1",
+    "glibc_runner_version": "2.0-3",
+    "ld_preload_name": "libtermux-exec-ld-preload.so"
+  },
+  "tests": [
+    {"id": "build", "description": "source build", "status": "pass", "exit_code": 0, "log": "logs/build.log"},
+    {"id": "state", "description": "atomic state and wrapper", "status": "pass", "exit_code": 0, "log": "logs/state.log"},
+    {"id": "integration", "description": "AArch64 integration", "status": "pass", "exit_code": 0, "log": "logs/integration.log"},
+    {"id": "proc_exe", "description": "proc-exe compatibility", "status": "pass", "exit_code": 0, "log": "logs/proc_exe.log"},
+    {"id": "repository", "description": "live repository contract", "status": "pass", "exit_code": 0, "log": "logs/repository.log"}
+  ],
+  "issue_url": "https://github.com/dsecurity49/glibcx/issues/4"
+}
