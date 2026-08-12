@@ -98,6 +98,7 @@ bash profiles/build-loader-audit.sh \
 
 prepared_tree="${TEST_TMP_DIR}/prepared"
 mkdir -p "${prepared_tree}/bin" "${prepared_tree}/lib/getconf" \
+    "${prepared_tree}/lib32" \
     "${prepared_tree}/lib/nested" "${prepared_tree}/share/locale/glibcx" \
     "${prepared_tree}/share/doc/glibcx"
 cp "$source_loader" "${prepared_tree}/lib/ld-linux-aarch64.so.1"
@@ -110,6 +111,9 @@ printf 'not part of runtime\n' >"${prepared_tree}/share/doc/glibcx/README"
 ln -s libc.so.6 "${prepared_tree}/lib/libc-fixture.so"
 ln -s ../libc.so.6 "${prepared_tree}/lib/nested/libc-parent.so"
 ln -s ../../bin/getconf "${prepared_tree}/lib/getconf/POSIX_V7_LP64_OFF64"
+printf 'arm32 loader fixture\n' >"${prepared_tree}/lib32/ld-linux-armhf.so.3"
+ln -s ../lib32/ld-linux-armhf.so.3 \
+    "${prepared_tree}/lib/ld-linux-armhf.so.3"
 
 final_prefix="${TEST_TMP_DIR}/installed/builder-fixture"
 build_payload() {
@@ -146,6 +150,9 @@ cmp "${first_payload}/profile.json" "${second_payload}/profile.json" >/dev/null 
     || fail "contained parent-relative symlink was not preserved"
 [[ ! -e "${first_payload}/lib/getconf" && ! -e "${first_payload}/share/doc" ]] \
     || fail "command-support or documentation files leaked into runtime payload"
+[[ ! -e "${first_payload}/lib/ld-linux-armhf.so.3" \
+    && ! -e "${first_payload}/lib32" ]] \
+    || fail "AArch32 multilib files leaked into AArch64 runtime payload"
 [[ -f "${first_payload}/lib/glibcx-proc-exe-shim.so" ]] \
     || fail "proc-exe shim was not included in the payload"
 jq -e '.proc_exe_shim.path
@@ -212,6 +219,14 @@ if build_payload "${TEST_TMP_DIR}/dangling-output" "$dangling_tree" 2>/dev/null;
     fail "dangling runtime symlink was accepted"
 fi
 pass "dangling symlink rejection"
+
+wrong_arm32_tree="${TEST_TMP_DIR}/wrong-arm32"
+cp -a "$prepared_tree" "$wrong_arm32_tree"
+ln -sfn libc.so.6 "${wrong_arm32_tree}/lib/ld-linux-armhf.so.3"
+if build_payload "${TEST_TMP_DIR}/wrong-arm32-output" "$wrong_arm32_tree" 2>/dev/null; then
+    fail "ARM32 loader bridge outside lib32 was accepted"
+fi
+pass "foreign-architecture loader bridge validation"
 
 unsafe_name_tree="${TEST_TMP_DIR}/unsafe-name"
 cp -a "$prepared_tree" "$unsafe_name_tree"

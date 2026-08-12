@@ -62,6 +62,23 @@ fi
 mkdir -p "$PAYLOAD_DIR"
 chmod 755 "$PAYLOAD_DIR"
 
+# The upstream AArch64 multilib package places this compatibility link in
+# lib/, but its target is the separately packaged AArch32 lib32/ tree.  A
+# managed glibcx runtime is AArch64-only, so verify the known layout before
+# omitting the link.  An upstream topology change must fail visibly.
+foreign_loader="${PREPARED_TREE}/lib/ld-linux-armhf.so.3"
+if [[ -e "$foreign_loader" || -L "$foreign_loader" ]]; then
+    [[ -L "$foreign_loader" ]] \
+        || { echo "[profile] Error: ARM32 loader bridge is not a symlink." >&2; exit 1; }
+    foreign_target=$(readlink "$foreign_loader")
+    [[ -n "$foreign_target" && "$foreign_target" != /* ]] \
+        || { echo "[profile] Error: ARM32 loader bridge has an unexpected target." >&2; exit 1; }
+    foreign_resolved=$(realpath -e "$(dirname "$foreign_loader")/${foreign_target}") \
+        || { echo "[profile] Error: ARM32 loader bridge target is missing." >&2; exit 1; }
+    [[ "$foreign_resolved" == "${PREPARED_TREE}/lib32/"* ]] \
+        || { echo "[profile] Error: ARM32 loader bridge does not target lib32." >&2; exit 1; }
+fi
+
 # Keep only files used by the dynamic loader at runtime. The upstream package
 # also contains commands, headers, manuals, and links into Termux's main prefix;
 # those do not form a self-contained managed runtime.
@@ -73,6 +90,7 @@ for inventory_root in lib etc share/i18n share/locale; do
     fi
 done
 rm -rf "${PAYLOAD_DIR:?}/lib/getconf"
+rm -f "${PAYLOAD_DIR}/lib/ld-linux-armhf.so.3"
 [[ -f "${PAYLOAD_DIR}/lib/ld-linux-aarch64.so.1" \
     && -f "${PAYLOAD_DIR}/lib/libc.so.6" ]] \
     || { echo "[profile] Error: prepared tree lacks the AArch64 loader/libc pair." >&2; exit 1; }
