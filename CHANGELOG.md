@@ -30,6 +30,9 @@ This is the upcoming v0.3 release.
   `$ORIGIN`; the executable directory is no longer searched implicitly.
 - Wrapper loading now accounts for the device page size and performs stricter
   mapping, alignment, entry-point, and argument validation.
+- Setup no longer changes Android's phantom-process limit automatically; it
+  asks first, defaults to no, and skips the option outside an interactive
+  Android 12-or-newer Shizuku session.
 
 ## [v0.2.0] - 2026-08-08
 ### Added

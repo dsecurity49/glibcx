@@ -3,7 +3,7 @@ cmd_help() {
 glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.3.0-dev)
 
 USAGE:
-    glibcx setup                   Install prerequisites and configure PATH / Shizuku
+    glibcx setup                   Install prerequisites and configure wrapper PATH
     glibcx patch <binary_path>     Inspect, verify, register, and compile a native wrapper
       --runtime <profile>          Select an installed runtime (system is explicit development use)
       --dry-run                    Inspect and verify without locks or file changes
