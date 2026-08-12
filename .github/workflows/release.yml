@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing annotated production tag (for example v0.3.0)
+        description: Existing annotated production tag (for example v0.3.1)
         required: true
         type: string
       profile_run_id:
@@ -69,6 +69,23 @@ jobs:
           path: release-input
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ inputs.profile_run_id }}
+
+      - name: Restore runtime filesystem metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=release-input/glibcx-runtime-profile.tar.xz
+          test -s "$archive"
+          source src/common.sh
+          source src/runtime.sh
+          TMP_DIR=$(mktemp -d)
+          cleanup() { rm -rf "${TMP_DIR:?}"; }
+          trap cleanup EXIT
+          _runtime_archive_validate "$archive"
+          restore_dir=$(mktemp -d "$RUNNER_TEMP/runtime-profile.XXXXXX")
+          tar --no-same-owner -xJf "$archive" -C "$restore_dir"
+          rm -f "$archive"
+          cp -a "$restore_dir/." release-input/
 
       - name: Validate immutable release inputs
         id: preflight

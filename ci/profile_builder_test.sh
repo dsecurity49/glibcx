@@ -169,6 +169,32 @@ jq -e '.compatibility_schema == 2
     || fail "loader-audit policy was not recorded in the profile"
 pass "deterministic manifest and runtime-only payload"
 
+# GitHub's directory-artifact transport flattens symlinks and modes.  The
+# workflow therefore transfers one tar archive and extracts it before release.
+transport_root="${TEST_TMP_DIR}/transport-root"
+transport_extract="${TEST_TMP_DIR}/transport-extract"
+transport_archive="${TEST_TMP_DIR}/glibcx-runtime-profile.tar.xz"
+mkdir -p "${transport_root}/payload" "$transport_extract"
+cp -a "$first_payload" "${transport_root}/payload/"
+LC_ALL=C tar --sort=name --mtime='@1767225600' \
+    --owner=0 --group=0 --numeric-owner --format=posix \
+    --pax-option=delete=atime,delete=ctime \
+    -cJf "$transport_archive" -C "$transport_root" .
+_runtime_archive_validate "$transport_archive" \
+    || fail "runtime transport archive failed safety validation"
+tar --no-same-owner -xJf "$transport_archive" \
+    -C "$transport_extract"
+transport_payload="${transport_extract}/payload/builder-fixture.payload"
+[[ -L "${transport_payload}/lib/libc-fixture.so" \
+    && "$(readlink "${transport_payload}/lib/libc-fixture.so")" == libc.so.6 ]] \
+    || fail "runtime transport did not preserve symlinks"
+_runtime_apply_inventory_modes "$transport_payload" \
+    "${transport_payload}/profile.json"
+_runtime_inventory_verify "$transport_payload" \
+    "${transport_payload}/profile.json" >/dev/null \
+    || fail "runtime transport changed the signed inventory"
+pass "runtime artifact transport preserves filesystem metadata"
+
 _runtime_profile_manifest_validate \
     "${first_payload}/profile.json" builder-fixture "$final_prefix" \
     || fail "prepared profile failed schema validation"

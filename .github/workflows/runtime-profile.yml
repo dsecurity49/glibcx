@@ -118,9 +118,20 @@ jobs:
             "$profile_file" "$PROFILE_ID" "$expected_prefix"
           _runtime_inventory_verify "$profile_root" "$profile_file" >/dev/null
 
+      - name: Preserve runtime filesystem metadata
+        shell: bash
+        env:
+          SOURCE_DATE_EPOCH: ${{ inputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          LC_ALL=C tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" \
+            --owner=0 --group=0 --numeric-owner --format=posix \
+            --pax-option=delete=atime,delete=ctime \
+            -cJf glibcx-runtime-profile.tar.xz -C glibcx-runtime-profile .
+
       - uses: actions/upload-artifact@v4
         with:
           name: glibcx-runtime-profile
-          path: glibcx-runtime-profile
+          path: glibcx-runtime-profile.tar.xz
           if-no-files-found: error
           retention-days: 30

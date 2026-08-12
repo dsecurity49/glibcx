@@ -1,6 +1,6 @@
 cmd_help() {
     cat << HELP
-glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.3.0)
+glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.3.1)
 
 USAGE:
     glibcx setup                   Install prerequisites and configure wrapper PATH
