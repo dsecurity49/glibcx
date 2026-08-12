@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible managed-runtime payload preparation and inventory tests.
 set -euo pipefail
+REPO_ROOT=$(pwd)
 
 pass() { printf '  PASS %s\n' "$*"; }
 fail() { printf '  FAIL %s\n' "$*" >&2; exit 1; }
@@ -16,6 +17,60 @@ source src/runtime.sh
 
 TMP_DIR="${TEST_TMP_DIR}/tmp"
 mkdir -p "$TMP_DIR"
+
+patch_fixture="${TEST_TMP_DIR}/patch-fixture"
+mkdir -p "${patch_fixture}/gpkg/linux-api-headers"
+cat >"${patch_fixture}/gpkg/linux-api-headers/build.sh" <<'PATCH_FIXTURE'
+termux_step_make() {
+	(
+		if [ "$TERMUX_ON_DEVICE_BUILD" = "false" ]; then
+			unset CFLAGS CXXFLAGS CC CXX AR RANLIB NM CXXFILT
+			export PATH="/usr/bin"
+		fi
+		make -C "${TERMUX_PKG_SRCDIR}" ARCH="${LINUX_ARCH}" mrproper
+	)
+}
+
+termux_step_make_install() {
+	make -C "${TERMUX_PKG_SRCDIR}" INSTALL_HDR_PATH="${TERMUX__PREFIX__INCLUDE_DIR}" ARCH="${LINUX_ARCH}" headers_install
+	rm -r "${TERMUX__PREFIX__INCLUDE_DIR}/drm"
+}
+PATCH_FIXTURE
+patch --batch -d "$patch_fixture" -p1 \
+    <profiles/patches/linux-api-headers-host-tools.patch >/dev/null \
+    || fail "Linux-header host-tool patch does not apply to the pinned recipe"
+[[ "$(grep -Fc 'export PATH="/usr/bin"' \
+    "${patch_fixture}/gpkg/linux-api-headers/build.sh")" -eq 2 ]] \
+    || fail "Linux-header install phase did not receive the native host environment"
+pass "Linux-header build and install phases use native host tools"
+
+run_in_builder_body=$(sed -n \
+    '/^run_in_builder()/,/^}/p' profiles/build-managed-runtime.sh)
+grep -Fq 'cd "$glibc_tree"' <<<"$run_in_builder_body" \
+    || fail "managed runtime container helper does not enter the pinned builder tree"
+[[ "$(grep -Fc 'run_in_builder ' profiles/build-managed-runtime.sh)" -eq 3 ]] \
+    || fail "not every managed runtime container invocation uses its repository root"
+grep -Fq 'CONTAINER_NAME="$builder_container"' profiles/build-managed-runtime.sh \
+    || fail "managed runtime container does not use an explicit stable name"
+[[ "$(grep -Fc 'docker cp ' profiles/build-managed-runtime.sh)" -eq 2 ]] \
+    || fail "managed runtime modules are not copied out of container-owned storage"
+pass "managed runtime container invocations use the pinned builder root"
+
+for dso_builder in profiles/build-proc-exe-shim.sh profiles/build-loader-audit.sh; do
+    grep -Fq 'command -v aarch64-linux-gnu-gcc' "$dso_builder" \
+        || fail "$dso_builder cannot use a CGCT compiler already in PATH"
+    grep -Fq '${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc' "$dso_builder" \
+        || fail "$dso_builder cannot find the pinned image's CGCT compiler"
+    grep -Fq -- '-isystem "$header_root"' "$dso_builder" \
+        || fail "$dso_builder does not pass the extracted profile's header root"
+done
+pass "managed runtime DSO builders support the pinned CGCT compiler"
+
+grep -Fq -- '--slurpfile files "$files_json_file"' profiles/prepare-profile.sh \
+    || fail "profile inventory is passed through the process argument list"
+grep -Fq -- '--slurpfile versions "$versions_json_file"' profiles/prepare-profile.sh \
+    || fail "profile versions are passed through the process argument list"
+pass "large profile metadata uses file-backed jq inputs"
 
 if [[ -x "${PREFIX:-/nonexistent}/glibc/lib/ld-linux-aarch64.so.1" ]]; then
     source_loader="${PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
@@ -42,13 +97,23 @@ bash profiles/build-loader-audit.sh \
     || fail "loader-audit fixture build failed"
 
 prepared_tree="${TEST_TMP_DIR}/prepared"
-mkdir -p "${prepared_tree}/lib" "${prepared_tree}/share/glibcx"
+mkdir -p "${prepared_tree}/bin" "${prepared_tree}/lib/getconf" \
+    "${prepared_tree}/lib32" \
+    "${prepared_tree}/lib/nested" "${prepared_tree}/share/locale/glibcx" \
+    "${prepared_tree}/share/doc/glibcx"
 cp "$source_loader" "${prepared_tree}/lib/ld-linux-aarch64.so.1"
 cp "$source_libc" "${prepared_tree}/lib/libc.so.6"
 printf 'not shipped\n' >"${prepared_tree}/lib/libc.a"
-printf '#!/bin/sh\nexit 0\n' >"${prepared_tree}/share/glibcx/helper"
-chmod 755 "${prepared_tree}/share/glibcx/helper"
+printf '#!/bin/sh\nexit 0\n' >"${prepared_tree}/share/locale/glibcx/helper"
+chmod 755 "${prepared_tree}/share/locale/glibcx/helper"
+printf '#!/bin/sh\nexit 0\n' >"${prepared_tree}/bin/getconf"
+printf 'not part of runtime\n' >"${prepared_tree}/share/doc/glibcx/README"
 ln -s libc.so.6 "${prepared_tree}/lib/libc-fixture.so"
+ln -s ../libc.so.6 "${prepared_tree}/lib/nested/libc-parent.so"
+ln -s ../../bin/getconf "${prepared_tree}/lib/getconf/POSIX_V7_LP64_OFF64"
+printf 'arm32 loader fixture\n' >"${prepared_tree}/lib32/ld-linux-armhf.so.3"
+ln -s ../lib32/ld-linux-armhf.so.3 \
+    "${prepared_tree}/lib/ld-linux-armhf.so.3"
 
 final_prefix="${TEST_TMP_DIR}/installed/builder-fixture"
 build_payload() {
@@ -65,7 +130,7 @@ build_payload() {
         LOADER_AUDIT_BINARY="$loader_audit" \
         TERMUX_INSTALL_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}" \
         SOURCE_DATE_EPOCH=1767225600 \
-        bash profiles/prepare-profile.sh \
+        bash "${REPO_ROOT}/profiles/prepare-profile.sh" \
             builder-fixture "$input_tree" "$final_prefix" "$output_dir" >/dev/null
 }
 
@@ -79,8 +144,15 @@ second_payload="${TEST_TMP_DIR}/second/builder-fixture.payload"
 cmp "${first_payload}/profile.json" "${second_payload}/profile.json" >/dev/null \
     || fail "identical inputs did not produce an identical profile manifest"
 [[ ! -e "${first_payload}/lib/libc.a" ]] || fail "SDK archive leaked into runtime payload"
-[[ "$(stat -c '%a' "${first_payload}/share/glibcx/helper")" == 755 ]] \
+[[ "$(stat -c '%a' "${first_payload}/share/locale/glibcx/helper")" == 755 ]] \
     || fail "executable payload mode was not preserved"
+[[ "$(readlink "${first_payload}/lib/nested/libc-parent.so")" == ../libc.so.6 ]] \
+    || fail "contained parent-relative symlink was not preserved"
+[[ ! -e "${first_payload}/lib/getconf" && ! -e "${first_payload}/share/doc" ]] \
+    || fail "command-support or documentation files leaked into runtime payload"
+[[ ! -e "${first_payload}/lib/ld-linux-armhf.so.3" \
+    && ! -e "${first_payload}/lib32" ]] \
+    || fail "AArch32 multilib files leaked into AArch64 runtime payload"
 [[ -f "${first_payload}/lib/glibcx-proc-exe-shim.so" ]] \
     || fail "proc-exe shim was not included in the payload"
 jq -e '.proc_exe_shim.path
@@ -103,7 +175,26 @@ _runtime_profile_manifest_validate \
 checked=$(_runtime_inventory_verify "$first_payload" "${first_payload}/profile.json") \
     || fail "prepared profile inventory failed verification"
 [[ "$checked" -ge 4 ]] || fail "prepared profile inventory was unexpectedly small"
+(
+    cd "$TEST_TMP_DIR"
+    _runtime_inventory_verify first/builder-fixture.payload \
+        first/builder-fixture.payload/profile.json >/dev/null
+) || fail "relative profile paths failed inventory verification"
+chmod 744 "${first_payload}/share/locale/glibcx/helper"
+if _runtime_inventory_verify "$first_payload" "${first_payload}/profile.json" \
+    >/dev/null 2>&1; then
+    fail "noncanonical executable mode passed inventory verification"
+fi
+chmod 755 "${first_payload}/share/locale/glibcx/helper"
 pass "profile schema and complete inventory"
+
+(
+    cd "$TEST_TMP_DIR"
+    build_payload relative-output
+) || fail "relative profile output path was rejected"
+[[ -f "${TEST_TMP_DIR}/relative-output/builder-fixture.payload/profile.json" ]] \
+    || fail "relative profile output was not created"
+pass "relative output path canonicalization"
 
 unsafe_tree="${TEST_TMP_DIR}/unsafe"
 cp -a "$prepared_tree" "$unsafe_tree"
@@ -112,6 +203,30 @@ if build_payload "${TEST_TMP_DIR}/unsafe-output" "$unsafe_tree" 2>/dev/null; the
     fail "absolute symlink target was accepted"
 fi
 pass "unsafe symlink rejection"
+
+escaping_tree="${TEST_TMP_DIR}/escaping"
+cp -a "$prepared_tree" "$escaping_tree"
+ln -s ../../outside "${escaping_tree}/lib/nested/escape.so"
+if build_payload "${TEST_TMP_DIR}/escaping-output" "$escaping_tree" 2>/dev/null; then
+    fail "parent-relative escaping symlink was accepted"
+fi
+pass "parent-relative symlink escape rejection"
+
+dangling_tree="${TEST_TMP_DIR}/dangling"
+cp -a "$prepared_tree" "$dangling_tree"
+ln -s missing.so "${dangling_tree}/lib/dangling.so"
+if build_payload "${TEST_TMP_DIR}/dangling-output" "$dangling_tree" 2>/dev/null; then
+    fail "dangling runtime symlink was accepted"
+fi
+pass "dangling symlink rejection"
+
+wrong_arm32_tree="${TEST_TMP_DIR}/wrong-arm32"
+cp -a "$prepared_tree" "$wrong_arm32_tree"
+ln -sfn libc.so.6 "${wrong_arm32_tree}/lib/ld-linux-armhf.so.3"
+if build_payload "${TEST_TMP_DIR}/wrong-arm32-output" "$wrong_arm32_tree" 2>/dev/null; then
+    fail "ARM32 loader bridge outside lib32 was accepted"
+fi
+pass "foreign-architecture loader bridge validation"
 
 unsafe_name_tree="${TEST_TMP_DIR}/unsafe-name"
 cp -a "$prepared_tree" "$unsafe_name_tree"

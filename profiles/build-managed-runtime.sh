@@ -23,7 +23,7 @@ SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-}"
 [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] || usage
 [[ -f "$LOCK_FILE" && ! -e "$OUTPUT_DIR" ]] || usage
 
-for command_name in bsdtar curl docker git jq sha256sum; do
+for command_name in bsdtar curl docker git jq patch sha256sum; do
     command -v "$command_name" >/dev/null 2>&1 \
         || { echo "[profile-build] Error: missing command '$command_name'." >&2; exit 1; }
 done
@@ -48,8 +48,17 @@ source_sha256=$(read_lock source_sha256)
 output_parent=$(dirname "$OUTPUT_DIR")
 output_name=$(basename "$OUTPUT_DIR")
 mkdir -p "$output_parent"
+output_parent=$(realpath -e "$output_parent")
+OUTPUT_DIR="${output_parent}/${output_name}"
 build_root=$(mktemp -d "${output_parent}/.managed-runtime.XXXXXX")
-cleanup() { rm -rf "${build_root:?}"; }
+builder_container=""
+cleanup() {
+    if [[ -n "$builder_container" ]] \
+        && docker container inspect "$builder_container" >/dev/null 2>&1; then
+        docker rm -f "$builder_container" >/dev/null 2>&1 || true
+    fi
+    rm -rf "${build_root:?}"
+}
 trap cleanup EXIT
 
 clone_pinned() {
@@ -72,6 +81,17 @@ for build_item in build-package.sh clean.sh packages x11-packages root-packages 
     cp -a "${termux_tree}/${build_item}" "$glibc_tree/"
 done
 
+builder_container="glibcx-runtime-builder-${BASHPID}"
+
+run_in_builder() {
+    (
+        cd "$glibc_tree"
+        CONTAINER_NAME="$builder_container" \
+            TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
+            ./scripts/run-docker.sh "$@"
+    )
+}
+
 final_prefix="/data/data/com.termux/files/usr/opt/glibcx/runtimes/${PROFILE_ID}"
 properties_file="${glibc_tree}/scripts/properties.sh"
 grep -Fqx 'TERMUX__PREFIX_GLIBC_SUBDIR="glibc"' "$properties_file" \
@@ -85,12 +105,15 @@ grep -Fqx "TERMUX_PKG_REVISION=${package_revision}" "$recipe"
 grep -Fqx "TERMUX_PKG_SRCURL=https://ftp.gnu.org/gnu/libc/glibc-\$TERMUX_PKG_VERSION.tar.xz" "$recipe"
 grep -Fqx "TERMUX_PKG_SHA256=${source_sha256}" "$recipe"
 
-(
-    cd "$glibc_tree"
-    TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
-        ./scripts/run-docker.sh ./build-package.sh \
-            -a aarch64 --format pacman --library glibc glibc
-)
+# The Linux-header recipe sanitizes the compiler environment for its clean
+# phase but not for headers_install. Building dependencies instead of using
+# standard-prefix packages therefore makes the host-side fixdep helper an
+# AArch64 target binary. Keep both phases on the container's native compiler.
+linux_headers_patch="profiles/patches/linux-api-headers-host-tools.patch"
+patch --batch --forward -d "$glibc_tree" -p1 <"$linux_headers_patch"
+
+run_in_builder ./build-package.sh \
+    -a aarch64 --format pacman --library glibc glibc
 
 package_root="${glibc_tree}/.glibcx-package-root"
 mkdir -p "$package_root"
@@ -116,25 +139,31 @@ loader_audit="${glibc_tree}/.glibcx-loader-audit.so"
 cp profiles/proc-exe-shim.c "${glibc_tree}/.glibcx-proc-exe-shim.c"
 cp profiles/build-proc-exe-shim.sh "${glibc_tree}/.glibcx-build-proc-exe-shim.sh"
 container_root=/home/builder/termux-packages
+container_module_root=/home/builder/.termux-build
 container_sysroot="${container_root}/${package_root#${glibc_tree}/}/${final_prefix#/}"
-TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
-    "${glibc_tree}/scripts/run-docker.sh" bash \
-        "${container_root}/.glibcx-build-proc-exe-shim.sh" \
-        "$container_sysroot" \
-        "${container_root}/.glibcx-proc-exe-shim.c" \
-        "${container_root}/.glibcx-proc-exe-shim.so"
+run_in_builder bash \
+    "${container_root}/.glibcx-build-proc-exe-shim.sh" \
+    "$container_sysroot" \
+    "${container_root}/.glibcx-proc-exe-shim.c" \
+    "${container_module_root}/.glibcx-proc-exe-shim.so"
+docker cp \
+    "${builder_container}:${container_module_root}/.glibcx-proc-exe-shim.so" \
+    "$proc_shim"
 [[ -f "$proc_shim" ]] \
     || { echo "[profile-build] Error: proc-exe shim build produced no DSO." >&2; exit 1; }
 cp profiles/loader-audit.c "${glibc_tree}/.glibcx-loader-audit.c"
 cp profiles/build-loader-audit.sh "${glibc_tree}/.glibcx-build-loader-audit.sh"
-TERMUX_BUILDER_IMAGE_NAME="$BUILDER_IMAGE" \
-    "${glibc_tree}/scripts/run-docker.sh" bash \
-        "${container_root}/.glibcx-build-loader-audit.sh" \
-        "$container_sysroot" \
-        "${container_root}/.glibcx-loader-audit.c" \
-        "${container_root}/.glibcx-loader-audit.so"
+run_in_builder bash \
+    "${container_root}/.glibcx-build-loader-audit.sh" \
+    "$container_sysroot" \
+    "${container_root}/.glibcx-loader-audit.c" \
+    "${container_module_root}/.glibcx-loader-audit.so"
+docker cp \
+    "${builder_container}:${container_module_root}/.glibcx-loader-audit.so" \
+    "$loader_audit"
 [[ -f "$loader_audit" ]] \
     || { echo "[profile-build] Error: loader-audit build produced no DSO." >&2; exit 1; }
+chmod 0644 "$proc_shim" "$loader_audit"
 
 source_tree="${build_root}/corresponding-source"
 mkdir -p "${source_tree}/build-material"
@@ -148,8 +177,10 @@ printf '%s  %s\n' "$source_sha256" "${source_archive##*/}" \
     cd "$glibc_tree"
     LC_ALL=C tar -cf - \
         build-package.sh clean.sh repo.json big-pkgs.list \
-        scripts ndk-patches packages gpkg/glibc
+        scripts ndk-patches packages gpkg/glibc gpkg/linux-api-headers
 ) | (cd "${source_tree}/build-material" && LC_ALL=C tar -xf -)
+mkdir -p "${source_tree}/build-material/glibcx-patches"
+cp "$linux_headers_patch" "${source_tree}/build-material/glibcx-patches/"
 cp "${glibc_tree}/LICENSE.md" "${source_tree}/glibc-packages-LICENSE.md"
 cp "${termux_tree}/LICENSE.md" "${source_tree}/termux-packages-LICENSE.md"
 cp "$LOCK_FILE" "${source_tree}/runtime-source.lock.json"

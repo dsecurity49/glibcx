@@ -11,23 +11,40 @@ sysroot="$1"
 source_file="$2"
 output_file="$3"
 
-[[ -f "${sysroot}/include/link.h" || -f "${sysroot}/usr/include/link.h" ]] || {
+header_root=""
+for include_root in "${sysroot}/include" "${sysroot}/usr/include"; do
+    if [[ -f "${include_root}/link.h" ]]; then
+        header_root="$include_root"
+        break
+    fi
+done
+[[ -n "$header_root" ]] || {
     echo "[loader-audit] Error: incomplete glibc sysroot (missing link.h)." >&2
     exit 1
 }
 [[ -f "$source_file" ]] \
     || { echo "[loader-audit] Error: source file is missing." >&2; exit 1; }
-command -v clang >/dev/null 2>&1 \
-    || { echo "[loader-audit] Error: clang is missing from the builder." >&2; exit 1; }
+if command -v clang >/dev/null 2>&1; then
+    compiler=(clang --target=aarch64-linux-gnu)
+elif command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    compiler=(aarch64-linux-gnu-gcc)
+elif [[ -x "${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc" ]]; then
+    compiler=("${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc")
+else
+    echo "[loader-audit] Error: no AArch64 C compiler is available." >&2
+    exit 1
+fi
 
 object_file=$(mktemp "${TMPDIR:-/tmp}/glibcx-loader-audit.XXXXXX.o")
 cleanup() { rm -f "${object_file:?}"; }
 trap cleanup EXIT
 
-clang --target=aarch64-linux-gnu --sysroot="$sysroot" \
+"${compiler[@]}" --sysroot="$sysroot" \
+    -isystem "$header_root" \
     -fPIC -ffreestanding -fno-stack-protector -O2 -Wall -Wextra -Werror \
     -c "$source_file" -o "$object_file"
-clang --target=aarch64-linux-gnu --sysroot="$sysroot" \
+"${compiler[@]}" --sysroot="$sysroot" \
+    -isystem "$header_root" \
     -shared -nostdlib -Wl,-z,defs -Wl,-soname,glibcx-loader-audit.so \
     "$object_file" -o "$output_file"
 

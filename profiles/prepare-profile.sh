@@ -51,19 +51,46 @@ SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
     && "$ANDROID_MIN_API" -ge 31 && "$ANDROID_MAX_API" -ge "$ANDROID_MIN_API" ]] \
     || { echo "[profile] Error: invalid Android API range." >&2; exit 1; }
 
+PREPARED_TREE=$(realpath -e "$PREPARED_TREE")
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR=$(realpath -e "$OUTPUT_DIR")
 PAYLOAD_DIR="${OUTPUT_DIR}/${PROFILE_ID}.payload"
 if [[ -e "$PAYLOAD_DIR" ]]; then
     echo "[profile] Error: output already exists: $PAYLOAD_DIR" >&2
     exit 1
 fi
-mkdir -p "$OUTPUT_DIR" "$PAYLOAD_DIR"
+mkdir -p "$PAYLOAD_DIR"
 chmod 755 "$PAYLOAD_DIR"
 
-for inventory_root in lib etc share; do
+# The upstream AArch64 multilib package places this compatibility link in
+# lib/, but its target is the separately packaged AArch32 lib32/ tree.  A
+# managed glibcx runtime is AArch64-only, so verify the known layout before
+# omitting the link.  An upstream topology change must fail visibly.
+foreign_loader="${PREPARED_TREE}/lib/ld-linux-armhf.so.3"
+if [[ -e "$foreign_loader" || -L "$foreign_loader" ]]; then
+    [[ -L "$foreign_loader" ]] \
+        || { echo "[profile] Error: ARM32 loader bridge is not a symlink." >&2; exit 1; }
+    foreign_target=$(readlink "$foreign_loader")
+    [[ -n "$foreign_target" && "$foreign_target" != /* ]] \
+        || { echo "[profile] Error: ARM32 loader bridge has an unexpected target." >&2; exit 1; }
+    foreign_resolved=$(realpath -e "$(dirname "$foreign_loader")/${foreign_target}") \
+        || { echo "[profile] Error: ARM32 loader bridge target is missing." >&2; exit 1; }
+    [[ "$foreign_resolved" == "${PREPARED_TREE}/lib32/"* ]] \
+        || { echo "[profile] Error: ARM32 loader bridge does not target lib32." >&2; exit 1; }
+fi
+
+# Keep only files used by the dynamic loader at runtime. The upstream package
+# also contains commands, headers, manuals, and links into Termux's main prefix;
+# those do not form a self-contained managed runtime.
+for inventory_root in lib etc share/i18n share/locale; do
     if [[ -d "${PREPARED_TREE}/${inventory_root}" ]]; then
-        cp -a "${PREPARED_TREE}/${inventory_root}" "$PAYLOAD_DIR/"
+        mkdir -p "${PAYLOAD_DIR}/$(dirname "$inventory_root")"
+        cp -a "${PREPARED_TREE}/${inventory_root}" \
+            "${PAYLOAD_DIR}/$(dirname "$inventory_root")/"
     fi
 done
+rm -rf "${PAYLOAD_DIR:?}/lib/getconf"
+rm -f "${PAYLOAD_DIR}/lib/ld-linux-armhf.so.3"
 [[ -f "${PAYLOAD_DIR}/lib/ld-linux-aarch64.so.1" \
     && -f "${PAYLOAD_DIR}/lib/libc.so.6" ]] \
     || { echo "[profile] Error: prepared tree lacks the AArch64 loader/libc pair." >&2; exit 1; }
@@ -84,13 +111,8 @@ done
 
 # SDK-only material is deliberately excluded from the runtime payload.
 find "$PAYLOAD_DIR" -type f \( -name '*.a' -o -name '*.o' -o -name '*.la' \) -delete
-while IFS= read -r -d '' payload_file; do
-    if [[ -x "$payload_file" ]]; then
-        chmod 755 "$payload_file"
-    else
-        chmod 644 "$payload_file"
-    fi
-done < <(find "$PAYLOAD_DIR" -type f -print0)
+find "$PAYLOAD_DIR" -type f -perm /111 -exec chmod 755 {} +
+find "$PAYLOAD_DIR" -type f ! -perm /111 -exec chmod 644 {} +
 chmod 755 "${PAYLOAD_DIR}/lib/ld-linux-aarch64.so.1"
 
 PROC_SHIM_RELATIVE=""
@@ -133,28 +155,37 @@ chmod 755 "${PAYLOAD_DIR}/${LOADER_AUDIT_RELATIVE}"
 
 records_file=$(mktemp)
 versions_file=$(mktemp)
-cleanup() { rm -f "${records_file:?}" "${versions_file:?}"; }
+hashes_file=$(mktemp)
+files_json_file=$(mktemp)
+versions_json_file=$(mktemp)
+cleanup() {
+    rm -f "${records_file:?}" "${versions_file:?}" "${hashes_file:?}" \
+        "${files_json_file:?}" "${versions_json_file:?}"
+}
 trap cleanup EXIT
 : >"$records_file"
 : >"$versions_file"
 
-while IFS= read -r -d '' payload_file; do
+find "$PAYLOAD_DIR" -type f -print0 | LC_ALL=C sort -z \
+    | xargs -0 -r sha256sum --zero >"$hashes_file"
+while IFS= read -r -d '' hash_record; do
+    file_magic=""
+    file_hash=${hash_record%%  *}
+    payload_file=${hash_record#*  }
     relative_path=${payload_file#"${PAYLOAD_DIR}/"}
     if [[ "$relative_path" == *$'\t'* || "$relative_path" == *$'\n'* || "$relative_path" == *$'\r'* ]]; then
         echo "[profile] Error: payload path contains a tab or line break: $relative_path" >&2
         exit 1
     fi
-    file_hash=$(LC_ALL=C sha256sum "$payload_file" | LC_ALL=C awk '{print $1}')
-    file_mode=$(LC_ALL=C stat -c '%a' "$payload_file")
-    case "$file_mode" in 644|755) ;; *)
-        echo "[profile] Error: unsupported file mode $file_mode for $relative_path" >&2
-        exit 1
-    esac
+    if [[ -x "$payload_file" ]]; then file_mode=755; else file_mode=644; fi
     printf '%s\tfile\t%s\t%s\n' "$relative_path" "$file_hash" "$file_mode" >>"$records_file"
-    LC_ALL=C readelf -W -V "$payload_file" 2>/dev/null \
-        | grep -oE 'GLIBC_ABI_[A-Za-z0-9_.]+|GLIBC_[0-9][A-Za-z0-9_.]*|GLIBCXX_[0-9][A-Za-z0-9_.]*|CXXABI_[0-9][A-Za-z0-9_.]*|GCC_[0-9][A-Za-z0-9_.]*' \
-        >>"$versions_file" || true
-done < <(find "$PAYLOAD_DIR" -type f -print0 | LC_ALL=C sort -z)
+    IFS= read -r -N 4 file_magic <"$payload_file" || true
+    if [[ "$file_magic" == $'\x7fELF' ]]; then
+        LC_ALL=C readelf -W -V "$payload_file" 2>/dev/null \
+            | grep -oE 'GLIBC_ABI_[A-Za-z0-9_.]+|GLIBC_[0-9][A-Za-z0-9_.]*|GLIBCXX_[0-9][A-Za-z0-9_.]*|CXXABI_[0-9][A-Za-z0-9_.]*|GCC_[0-9][A-Za-z0-9_.]*' \
+            >>"$versions_file" || true
+    fi
+done <"$hashes_file"
 
 while IFS= read -r -d '' payload_link; do
     relative_path=${payload_link#"${PAYLOAD_DIR}/"}
@@ -163,25 +194,29 @@ while IFS= read -r -d '' payload_link; do
         exit 1
     fi
     link_target=$(readlink "$payload_link")
-    if [[ "$link_target" == /* ]]; then
-        echo "[profile] Error: symlink target must be relative: $relative_path" >&2
+    if [[ -z "$link_target" || "$link_target" == /* \
+        || "$link_target" == *$'\t'* || "$link_target" == *$'\n'* \
+        || "$link_target" == *$'\r'* ]]; then
+        echo "[profile] Error: symlink target must be a safe relative path: $relative_path" >&2
         exit 1
     fi
     resolved_target=$(realpath -m "$(dirname "$payload_link")/${link_target}")
     [[ "$resolved_target" == "$PAYLOAD_DIR" || "$resolved_target" == "${PAYLOAD_DIR}/"* ]] \
         || { echo "[profile] Error: symlink escapes payload: $relative_path" >&2; exit 1; }
+    [[ -e "$resolved_target" ]] \
+        || { echo "[profile] Error: symlink target is missing from payload: $relative_path" >&2; exit 1; }
     printf '%s\tsymlink\t%s\t\n' "$relative_path" "$link_target" >>"$records_file"
 done < <(find "$PAYLOAD_DIR" -type l -print0 | LC_ALL=C sort -z)
 
-files_json=$(LC_ALL=C sort "$records_file" | jq -Rn '[
+LC_ALL=C sort "$records_file" | jq -Rn '[
     inputs | split("\t")
     | if .[1] == "file"
       then {path: .[0], type: "file", sha256: .[2], mode: .[3]}
       else {path: .[0], type: "symlink", target: .[2]}
       end
-]')
-versions_json=$(LC_ALL=C sort -uV "$versions_file" \
-    | jq -Rsc 'split("\n") | map(select(length > 0))')
+]' >"$files_json_file"
+LC_ALL=C sort -uV "$versions_file" \
+    | jq -Rsc 'split("\n") | map(select(length > 0))' >"$versions_json_file"
 created_at=$(date -u -d "@${SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')
 proc_shim_json=null
 if [[ -n "$PROC_SHIM_RELATIVE" ]]; then
@@ -213,8 +248,8 @@ jq -n \
     --arg termux_commit "$TERMUX_GLIBC_COMMIT" \
     --arg source_offer "$CORRESPONDING_SOURCE_URL" \
     --arg toolchain "$TOOLCHAIN_DESCRIPTION" \
-    --argjson files "$files_json" \
-    --argjson versions "$versions_json" \
+    --slurpfile files "$files_json_file" \
+    --slurpfile versions "$versions_json_file" \
     --argjson proc_shim "$proc_shim_json" \
     --argjson loader_audit "$loader_audit_json" \
     '{
@@ -241,11 +276,11 @@ jq -n \
             toolchain: $toolchain,
             licenses: ["LGPL-2.1-or-later", "GPL-2.0-or-later"]
         },
-        provided_versions: $versions,
+        provided_versions: $versions[0],
         allowed_tunables: [],
         loader_audit: $loader_audit,
         loader_policy: {glibc_hwcaps_mask: ""},
-        files: $files
+        files: $files[0]
     } + (if $proc_shim == null then {} else {proc_exe_shim: $proc_shim} end)' \
     >"${PAYLOAD_DIR}/profile.json"
 chmod 644 "${PAYLOAD_DIR}/profile.json"

@@ -11,7 +11,14 @@ sysroot="$1"
 source_file="$2"
 output_file="$3"
 
-[[ -f "${sysroot}/include/stdio.h" || -f "${sysroot}/usr/include/stdio.h" ]] || {
+header_root=""
+for include_root in "${sysroot}/include" "${sysroot}/usr/include"; do
+    if [[ -f "${include_root}/stdio.h" ]]; then
+        header_root="$include_root"
+        break
+    fi
+done
+[[ -n "$header_root" ]] || {
     echo "[proc-shim] Error: incomplete glibc sysroot (missing stdio.h)." >&2
     exit 1
 }
@@ -28,10 +35,19 @@ done
 }
 [[ -f "$source_file" ]] \
     || { echo "[proc-shim] Error: source file is missing." >&2; exit 1; }
-command -v clang >/dev/null 2>&1 \
-    || { echo "[proc-shim] Error: clang is missing from the builder." >&2; exit 1; }
+if command -v clang >/dev/null 2>&1; then
+    compiler=(clang --target=aarch64-linux-gnu)
+elif command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    compiler=(aarch64-linux-gnu-gcc)
+elif [[ -x "${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc" ]]; then
+    compiler=("${CGCT_DIR:-/data/data/com.termux/cgct}/aarch64/bin/aarch64-linux-gnu-gcc")
+else
+    echo "[proc-shim] Error: no AArch64 C compiler is available." >&2
+    exit 1
+fi
 
-clang --target=aarch64-linux-gnu --sysroot="$sysroot" \
+"${compiler[@]}" --sysroot="$sysroot" \
+    -isystem "$header_root" \
     -shared -fPIC -nostdlib -O2 -Wall -Wextra -Werror \
     "$source_file" "$libc_path" \
     -Wl,-soname,glibcx-proc-exe-shim.so -o "$output_file"
