@@ -17,6 +17,32 @@ source src/runtime.sh
 TMP_DIR="${TEST_TMP_DIR}/tmp"
 mkdir -p "$TMP_DIR"
 
+patch_fixture="${TEST_TMP_DIR}/patch-fixture"
+mkdir -p "${patch_fixture}/gpkg/linux-api-headers"
+cat >"${patch_fixture}/gpkg/linux-api-headers/build.sh" <<'PATCH_FIXTURE'
+termux_step_make() {
+	(
+		if [ "$TERMUX_ON_DEVICE_BUILD" = "false" ]; then
+			unset CFLAGS CXXFLAGS CC CXX AR RANLIB NM CXXFILT
+			export PATH="/usr/bin"
+		fi
+		make -C "${TERMUX_PKG_SRCDIR}" ARCH="${LINUX_ARCH}" mrproper
+	)
+}
+
+termux_step_make_install() {
+	make -C "${TERMUX_PKG_SRCDIR}" INSTALL_HDR_PATH="${TERMUX__PREFIX__INCLUDE_DIR}" ARCH="${LINUX_ARCH}" headers_install
+	rm -r "${TERMUX__PREFIX__INCLUDE_DIR}/drm"
+}
+PATCH_FIXTURE
+patch --batch -d "$patch_fixture" -p1 \
+    <profiles/patches/linux-api-headers-host-tools.patch >/dev/null \
+    || fail "Linux-header host-tool patch does not apply to the pinned recipe"
+[[ "$(grep -Fc 'export PATH="/usr/bin"' \
+    "${patch_fixture}/gpkg/linux-api-headers/build.sh")" -eq 2 ]] \
+    || fail "Linux-header install phase did not receive the native host environment"
+pass "Linux-header build and install phases use native host tools"
+
 if [[ -x "${PREFIX:-/nonexistent}/glibc/lib/ld-linux-aarch64.so.1" ]]; then
     source_loader="${PREFIX}/glibc/lib/ld-linux-aarch64.so.1"
     source_libc="${PREFIX}/glibc/lib/libc.so.6"

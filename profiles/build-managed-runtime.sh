@@ -23,7 +23,7 @@ SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-}"
 [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] || usage
 [[ -f "$LOCK_FILE" && ! -e "$OUTPUT_DIR" ]] || usage
 
-for command_name in bsdtar curl docker git jq sha256sum; do
+for command_name in bsdtar curl docker git jq patch sha256sum; do
     command -v "$command_name" >/dev/null 2>&1 \
         || { echo "[profile-build] Error: missing command '$command_name'." >&2; exit 1; }
 done
@@ -84,6 +84,13 @@ grep -Fqx "TERMUX_PKG_VERSION=${glibc_version}" "$recipe"
 grep -Fqx "TERMUX_PKG_REVISION=${package_revision}" "$recipe"
 grep -Fqx "TERMUX_PKG_SRCURL=https://ftp.gnu.org/gnu/libc/glibc-\$TERMUX_PKG_VERSION.tar.xz" "$recipe"
 grep -Fqx "TERMUX_PKG_SHA256=${source_sha256}" "$recipe"
+
+# The Linux-header recipe sanitizes the compiler environment for its clean
+# phase but not for headers_install. Building dependencies instead of using
+# standard-prefix packages therefore makes the host-side fixdep helper an
+# AArch64 target binary. Keep both phases on the container's native compiler.
+linux_headers_patch="profiles/patches/linux-api-headers-host-tools.patch"
+patch --batch --forward -d "$glibc_tree" -p1 <"$linux_headers_patch"
 
 (
     cd "$glibc_tree"
@@ -148,8 +155,10 @@ printf '%s  %s\n' "$source_sha256" "${source_archive##*/}" \
     cd "$glibc_tree"
     LC_ALL=C tar -cf - \
         build-package.sh clean.sh repo.json big-pkgs.list \
-        scripts ndk-patches packages gpkg/glibc
+        scripts ndk-patches packages gpkg/glibc gpkg/linux-api-headers
 ) | (cd "${source_tree}/build-material" && LC_ALL=C tar -xf -)
+mkdir -p "${source_tree}/build-material/glibcx-patches"
+cp "$linux_headers_patch" "${source_tree}/build-material/glibcx-patches/"
 cp "${glibc_tree}/LICENSE.md" "${source_tree}/glibc-packages-LICENSE.md"
 cp "${termux_tree}/LICENSE.md" "${source_tree}/termux-packages-LICENSE.md"
 cp "$LOCK_FILE" "${source_tree}/runtime-source.lock.json"
