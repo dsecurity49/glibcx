@@ -13,7 +13,10 @@ TMP_DIR="${CLI_STORAGE}/tmp"
 PROFILE_STATE_DIR="${CLI_STORAGE}/profiles"
 RUNTIME_ROOT="${PREFIX:-/data/data/com.termux/files/usr}/opt/glibcx/runtimes"
 STATE_SCHEMA=3
-GLIBCX_VERSION="0.3.1"
+GLIBCX_VERSION="0.4.0"
+GLIBCX_PACKAGE_MANAGED="${GLIBCX_PACKAGE_MANAGED:-0}"
+GLIBCX_CORE_PROTOCOL=1
+GLIBCX_CORE_BIN="${GLIBCX_CORE_BIN:-${PREFIX:-/data/data/com.termux/files/usr}/opt/glibcx/bin/glibcx-core-${GLIBCX_VERSION}}"
 PROFILE_COMPATIBILITY_SCHEMA=2
 
 # Release trust is pinned to the public key produced by the offline production

@@ -8,6 +8,28 @@ on:
     branches: ["main", "release/**"]
 
 jobs:
+  core:
+    name: Rust ELF core
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-linux-android
+          components: rustfmt, clippy
+
+      - name: Test, lint, and verify reproducible release output
+        run: |
+          cargo fmt --manifest-path core/Cargo.toml --check
+          cargo test --manifest-path core/Cargo.toml --locked
+          cargo clippy --manifest-path core/Cargo.toml --locked --all-targets -- -D warnings
+          CARGO_INCREMENTAL=0 cargo build --manifest-path core/Cargo.toml --release --locked
+          cp core/target/release/glibcx-core /tmp/glibcx-core-first
+          cargo clean --manifest-path core/Cargo.toml
+          CARGO_INCREMENTAL=0 cargo build --manifest-path core/Cargo.toml --release --locked
+          cmp /tmp/glibcx-core-first core/target/release/glibcx-core
+
   # ── Job 1: Shell lint + syntax ──────────────────────────────────────────────
   lint:
     name: Shell lint & syntax
@@ -99,8 +121,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@1.97.1
+
       - name: Build and compare the monolithic executable
         run: |
+          bash build.sh
+          cmp glibcx glibcx-bin
+          test -x glibcx-core-bin
+          GLIBCX_PACKAGE_MANAGED=1 bash build.sh
+          ! grep -q '^cmd_setup()' glibcx-bin
+          ! grep -q '^cmd_selfupdate()' glibcx-bin
+          ! bash glibcx-bin --help | grep -q 'PACKAGE-INDEPENDENT COMMANDS'
           bash build.sh
           cmp glibcx glibcx-bin
 
@@ -111,6 +142,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@1.97.1
+
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
@@ -118,6 +151,8 @@ jobs:
 
       - name: Run schema and state tests
         run: |
+          bash build.sh
+          export GLIBCX_CORE_BIN="$GITHUB_WORKSPACE/glibcx-core-bin"
           bash ci/state_test.sh
           bash ci/elf_test.sh
           bash ci/runtime_test.sh

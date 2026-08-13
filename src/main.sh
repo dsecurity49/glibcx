@@ -1,9 +1,8 @@
 cmd_help() {
     cat << HELP
-glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.3.1)
+glibcx - Universal Native-Speed glibc Binary Runner for Termux (v0.4.0)
 
 USAGE:
-    glibcx setup                   Install prerequisites and configure wrapper PATH
     glibcx patch <binary_path>     Inspect, verify, register, and compile a native wrapper
       --runtime <profile>          Select an installed runtime (system is explicit development use)
       --dry-run                    Inspect and verify without locks or file changes
@@ -30,7 +29,7 @@ USAGE:
                                   Install a signed managed runtime
     glibcx runtime <command>       Also supports list, import-system, verify, and remove
     glibcx benchmark               Download + patch 11 popular binaries not in Termux
-    glibcx self-update [--force]   Update glibcx to the latest release
+    glibcx version                  Print the frontend and ELF-core compatibility status
 
 SMART PROVIDERS:
     glibcx npm install <pkg> [--runtime <id>]
@@ -55,10 +54,33 @@ EXAMPLES:
     glibcx intercept 'curl -fsSL https://bun.sh/install | bash' --runtime system
     glibcx run ./my-binary -- --version
 HELP
+    if [[ "$GLIBCX_PACKAGE_MANAGED" != 1 ]]; then
+        cat << HELP
+
+PACKAGE-INDEPENDENT COMMANDS:
+    glibcx setup                   Install prerequisites and configure wrapper PATH
+    glibcx self-update [--force]   Update glibcx to the latest release
+HELP
+    fi
+}
+
+cmd_version() {
+    printf 'glibcx %s\n' "$GLIBCX_VERSION"
+    if _elf_core_handshake; then
+        printf 'ELF core protocol %s: compatible\n' "$GLIBCX_CORE_PROTOCOL"
+    else
+        printf 'ELF core protocol %s: unavailable\n' "$GLIBCX_CORE_PROTOCOL"
+    fi
 }
 
 case "${1:-}" in
-    setup)       cmd_setup ;;
+    setup)
+        if [[ "$GLIBCX_PACKAGE_MANAGED" == 1 ]]; then
+            echo "[glibcx] Error: setup is disabled; install prerequisites with pkg." >&2
+            exit 2
+        fi
+        cmd_setup
+        ;;
     npm)         shift; cmd_npm "$@" ;;
     gh)          shift; cmd_gh "$@" ;;
     fetch)       shift; cmd_fetch "$@" ;;
@@ -77,7 +99,15 @@ case "${1:-}" in
     runtime)     shift; cmd_runtime "$@" ;;
     run)         shift; cmd_run "$@" ;;
     benchmark)   cmd_bench ;;
-    self-update) shift; cmd_selfupdate "$@" ;;
+    self-update)
+        if [[ "$GLIBCX_PACKAGE_MANAGED" == 1 ]]; then
+            echo "[glibcx] Error: self-update is disabled; update glibcx with pkg." >&2
+            exit 2
+        fi
+        shift
+        cmd_selfupdate "$@"
+        ;;
+    version|--version) cmd_version ;;
     help|--help|-h) cmd_help ;;
     *)           cmd_help; exit 1 ;;
 esac

@@ -47,7 +47,6 @@ cmd_doctor() {
         return 1
     fi
     _require_command jq jq
-    _require_command readelf binutils
     target_bin=$(realpath "$target_bin")
 
     inspection=$(elf_inspect "$target_bin")

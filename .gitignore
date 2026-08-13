@@ -1,5 +1,7 @@
 # Build artifacts
 glibcx-bin
+glibcx-core-bin
+core/target/
 *.tar.gz
 *.tgz
 *.zip
