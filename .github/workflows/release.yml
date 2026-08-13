@@ -49,6 +49,7 @@ jobs:
     outputs:
       commit: ${{ steps.preflight.outputs.commit }}
       profile_id: ${{ steps.preflight.outputs.profile_id }}
+      release_id: ${{ steps.stage_release.outputs.release_id }}
     env:
       TAG: ${{ inputs.tag }}
       CATALOG_VERSION: ${{ inputs.catalog_version }}
@@ -196,18 +197,30 @@ jobs:
           retention-days: 30
 
       - name: Create the fully populated draft release
+        id: stage_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          release_matches=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            | jq -s --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]')
+          if [[ "$(jq 'length' <<<"$release_matches")" -ne 0 ]]; then
             echo "Release '$TAG' already exists; corrections require a new tag." >&2
             exit 1
           fi
           gh release create "$TAG" release-assets/* \
             --verify-tag --draft --title "$TAG" \
             --notes "Signed glibcx release candidate. Publication is gated by independent asset verification."
+          release_matches=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            | jq -s --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]')
+          test "$(jq 'length' <<<"$release_matches")" -eq 1
+          release_id=$(jq -r '.[0].id' <<<"$release_matches")
+          test "$(jq -r '.[0].draft' <<<"$release_matches")" = true
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          printf 'release_id=%s\n' "$release_id" >>"$GITHUB_OUTPUT"
 
       - name: Remove imported private material
         if: always()
@@ -229,6 +242,7 @@ jobs:
       contents: read
     env:
       TAG: ${{ inputs.tag }}
+      RELEASE_ID: ${{ needs.package.outputs.release_id }}
       PRIMARY_FINGERPRINT: ${{ vars.GLIBCX_RELEASE_PRIMARY_FINGERPRINT }}
       SIGNING_FINGERPRINT: ${{ vars.GLIBCX_RELEASE_SIGNING_FINGERPRINT }}
     steps:
@@ -249,9 +263,13 @@ jobs:
           set -euo pipefail
           bash ci/verify-release-assets.sh \
             release-assets "$TAG" "$PRIMARY_FINGERPRINT" "$SIGNING_FINGERPRINT"
-          release_state=$(gh release view "$TAG" --json isDraft,isPrerelease,assets)
-          test "$(jq -r '.isDraft' <<<"$release_state")" = true
-          test "$(jq -r '.isPrerelease' <<<"$release_state")" = false
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          release_state=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")
+          test "$(jq -r '.tag_name' <<<"$release_state")" = "$TAG"
+          test "$(jq -r '.draft' <<<"$release_state")" = true
+          test "$(jq -r '.prerelease' <<<"$release_state")" = false
+          test "$(jq '.assets | length' <<<"$release_state")" -eq 12
           remote_digests=$(jq -r '.assets[] | [.name, .digest] | @tsv' <<<"$release_state")
           asset_count=0
           for asset in release-assets/*; do
@@ -276,6 +294,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ inputs.tag }}
+      RELEASE_ID: ${{ needs.package.outputs.release_id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -290,12 +309,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release edit "$TAG" --draft=false --latest --verify-tag
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          release_state=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}")
+          test "$(jq -r '.tag_name' <<<"$release_state")" = "$TAG"
+          test "$(jq -r '.draft' <<<"$release_state")" = true
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false -f make_latest=true >/dev/null
           immutable=false
           for _attempt in $(seq 1 20); do
             immutable=$(gh api \
               -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.immutable')
+              "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.immutable')
             [[ "$immutable" == true ]] && break
             sleep 3
           done
